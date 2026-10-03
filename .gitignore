@@ -1,0 +1,9 @@
+push_config.json
+.workbuddy/
+cloud_state.json.bak
+train_snapshot.json
+train_log.txt
+board_run.log
+_scan.txt
+_port.txt
+__pycache__/
