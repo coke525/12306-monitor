@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>10-06 余票实时看板</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --card:#ffffff; --line:#e3e6ea; --text:#1f2328;
+    --muted:#6b7280; --ok:#0f9960; --okbg:#e6f6ee; --hot:#d7263d;
+    --hotbg:#fdecee; --blue:#2563eb; --bluebg:#e8f0fe; --warn:#b45309;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:14px/1.55 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:1080px;margin:0 auto;padding:18px 16px 60px}
+  h1{font-size:19px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:12.5px;margin-bottom:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+        padding:14px 16px;margin-bottom:14px}
+  .card h2{font-size:14.5px;margin:0 0 10px;display:flex;align-items:center;gap:8px}
+  .tag{font-size:11px;padding:1px 7px;border-radius:20px;background:var(--bluebg);
+       color:var(--blue);font-weight:600}
+  .tag.g{background:var(--okbg);color:var(--ok)}
+  .bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;
+       font-size:12.5px;color:var(--muted)}
+  .bar b{color:var(--text)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);
+       display:inline-block;margin-right:5px}
+  .dot.off{background:#c9ced6}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;font-weight:600;color:var(--muted);font-size:12px;
+     padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:7px 8px;border-bottom:1px solid #f0f2f5;white-space:nowrap}
+  tr.hit{background:var(--okbg)}
+  tr.dead td{color:#9aa1ab}
+  .code{font-weight:700;letter-spacing:.3px}
+  .pill{display:inline-block;min-width:34px;text-align:center;padding:1px 6px;
+        border-radius:5px;font-size:12px;background:#f0f2f5;color:#9aa1ab}
+  .pill.y{background:var(--okbg);color:var(--ok);font-weight:700}
+  .banner{display:none;background:var(--hotbg);border:1px solid #f5c2c7;
+          color:var(--hot);border-radius:10px;padding:11px 14px;margin-bottom:14px;
+          font-weight:600;font-size:13.5px}
+  .banner.show{display:block}
+  .ev{font-size:12.5px;color:var(--muted);max-height:150px;overflow:auto}
+  .ev div{padding:3px 0;border-bottom:1px dashed #eceff2}
+  .ev .new{color:var(--hot);font-weight:700}
+  .plan{border:1px solid var(--line);border-radius:9px;padding:11px 13px;
+        margin-bottom:9px;background:#fcfcfd}
+  .plan.best{border-color:var(--ok);background:var(--okbg)}
+  .plan .hd{font-weight:700;font-size:13.5px;margin-bottom:5px}
+  .plan .ln{font-size:12.5px;color:#40464e}
+  .plan .buf{color:var(--warn)}
+  .empty{color:var(--muted);font-size:13px;padding:6px 0}
+  .ts{display:inline-block;background:#fdecee;color:var(--hot);font-weight:700;
+      padding:1px 7px;border-radius:5px;margin:0 2px;letter-spacing:.2px}
+  .ts.g{background:var(--okbg);color:var(--ok)}
+  .hint{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.7}
+  button{font-size:12px;padding:4px 10px;border:1px solid var(--line);
+         background:#fff;border-radius:6px;cursor:pointer;color:var(--text)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>10 月 6 日 / 7 日 · 平顶山·宝丰 → 焦作西　实时余票看板</h1>
+  <div class="sub">直连 12306 官方接口 · 后端每 60 秒查一次 · 页面每 30 秒刷新 · 命中偏好的方案会响铃并推微信</div>
+
+  <div class="banner" id="banner"></div>
+
+  <div class="card">
+    <div class="bar">
+      <span><span class="dot" id="dot"></span><b id="st">加载中…</b></span>
+      <span>最后更新：<b id="upd">--</b></span>
+      <span>首段有票 <b id="n1">-</b> 趟</span>
+      <span>第二段有票 <b id="n2">-</b> 趟</span>
+      <span>可衔接方案 <b id="np">-</b> 个</span>
+      <button onclick="beep()">测试响铃</button>
+      <button onclick="location.reload()">手动刷新</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>推荐方案 <span class="tag g">命中出发偏好</span></h2>
+    <div id="plans"><div class="empty">加载中…</div></div>
+    <div class="hint">
+      命中条件：<b>10-06</b> 10:00–17:30 发车且 18:00 前到焦作西；
+      <b>10-07</b> <b>09:00–10:00</b> 发车且 <b>17:00 前到焦作西</b>。<br>
+      最多两段换乘（家 → 郑州同城 → 焦作 → 焦作西）。换乘间隔按前后车类型给：
+      高铁/动车互转 ≥25 分、转普速 ≥30 分、<b>普速转任何车 ≥45 分</b>（普速容易晚点）、
+      焦作站换城际 ≥20 分。不够的直接在生成时就丢弃，能列出的都赶得上。
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>第一段 · 家 → 郑州 / 郑州东</h2>
+    <table><thead><tr>
+      <th>日期</th><th>车次</th><th>区间</th><th>时间段</th>
+      <th>商务</th><th>一等</th><th>二等</th><th>无座</th><th>状态</th>
+    </tr></thead><tbody id="t1"></tbody></table>
+  </div>
+
+  <div class="card">
+    <h2>第二段 · 郑州 / 郑州东 → 焦作西 / 焦作</h2>
+    <table><thead><tr>
+      <th>日期</th><th>车次</th><th>区间</th><th>时间段</th>
+      <th>商务</th><th>一等</th><th>二等</th><th>无座</th><th>状态</th>
+    </tr></thead><tbody id="t2"></tbody></table>
+    <div class="hint">郑州/郑州东 → 焦作西 19:00 后无车；但到「焦作」的车很多，焦作打车到焦作西约 20 分钟。</div>
+  </div>
+
+  <div class="card">
+    <h2>放票 / 抢空记录</h2>
+    <div class="ev" id="ev"><div class="empty">暂无</div></div>
+  </div>
+</div>
+
+<script>
+let seen = new Set(JSON.parse(localStorage.getItem('seenEv') || '[]'));
+let first = seen.size === 0;
+
+function beep(){
+  try{
+    const c = new (window.AudioContext||window.webkitAudioContext)();
+    [880,1180,880].forEach((f,i)=>{
+      const o=c.createOscillator(), g=c.createGain();
+      o.frequency.value=f; o.connect(g); g.connect(c.destination);
+      const t=c.currentTime+i*0.22;
+      g.gain.setValueAtTime(0.0001,t);
+      g.gain.exponentialRampToValueAtTime(0.28,t+0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001,t+0.20);
+      o.start(t); o.stop(t+0.22);
+    });
+  }catch(e){}
+}
+
+function pill(v){
+  const s=(v||'').trim();
+  const n = s==='有' ? 999 : (parseInt(s,10)||0);
+  return '<span class="pill'+(n>0?' y':'')+'">'+(s||'-')+'</span>';
+}
+
+function rows(list){
+  return list.map(r=>{
+    const dead = r.total<=0 ? ' class="dead"' : '';
+    const cl = r.total>0 ? 'ts' : 'ts g';
+    return '<tr'+dead+'><td>'+(r.date||'').slice(5)+'</td><td class="code">'+r.code+
+      '</td><td>'+r.from+'→'+r.to+
+      '</td><td><span class="'+cl+'">'+r.start+'→'+r.arrive+'</span></td>'+
+      '<td>'+pill(r.seats['商务座'])+
+      '</td><td>'+pill(r.seats['一等座'])+'</td><td>'+pill(r.seats['二等座'])+
+      '</td><td>'+pill(r.seats['无座'])+'</td><td>'+
+      (r.total>0?'<b style="color:var(--ok)">有票</b>':'无票')+'</td></tr>';
+  }).join('') || '<tr><td colspan="9" class="empty">无数据</td></tr>';
+}
+
+function renderPlans(ps){
+  if(!ps.length){ document.getElementById('plans').innerHTML =
+    '<div class="empty">当前没有任何可衔接的两段组合 —— 首段没票，只能等退票或挂候补。</div>'; return; }
+  document.getElementById('plans').innerHTML = ps.map(p=>{
+    const cl = p.hit ? 'ts' : 'ts g';
+    const legs = (p.legs||[]).map((l,i)=>
+      '<div class="ln">第'+(i+1)+'段 '+l.code+'：'+l.from+'→'+l.to+
+      ' <span class="'+cl+'">'+l.start+'→'+l.arrive+'</span>'+
+      '　二等 '+(l.seats['二等座']||'-')+' / 无座 '+(l.seats['无座']||'-')+'</div>').join('');
+    let buf = '';
+    if((p.buffers||[]).length){
+      buf = '<div class="ln">换乘间隔 '+p.buffers.join(' 分、')+' 分'+
+        '（建议分别 ≥'+p.needs.join('/')+' 分）'+(p.tight?'　⚠ 偏紧':'')+'</div>';
+    }else{
+      buf = '<div class="ln">无需换乘</div>';
+    }
+    return '<div class="plan'+(p.hit?' best':'')+'">'+
+      '<div class="hd">'+(p.hit?'★ ':'')+p.date.slice(5)+'　'+p.seat_tag+'　'+p.nlegs+' 段'+
+        '　预计 <b>'+p.final+'</b> 到焦作西</div>'+legs+buf+'</div>';
+  }).join('');
+}
+
+function tick(){
+  fetch('/api?t='+Date.now()).then(r=>r.json()).then(d=>{
+    document.getElementById('dot').className = 'dot'+(d.ok?'':' off');
+    document.getElementById('st').textContent = d.ok ? '监控运行中' : '查询异常：'+d.error;
+    document.getElementById('upd').textContent = d.updated || '--';
+    document.getElementById('n1').textContent = d.leg1.filter(x=>x.total>0).length;
+    document.getElementById('n2').textContent = d.leg2.filter(x=>x.total>0).length;
+    document.getElementById('np').textContent = d.plans.length;
+    renderPlans(d.plans);
+    document.getElementById('t1').innerHTML = rows(d.leg1);
+    document.getElementById('t2').innerHTML = rows(d.leg2);
+
+    const ev = d.events || [];
+    const fresh = ev.filter(e=>!seen.has(e.id));
+    if(!first && fresh.length){
+      const big = fresh.filter(e=>e.big);
+      if(big.length){
+        document.getElementById('banner').className='banner show';
+        document.getElementById('banner').textContent =
+          '🔔 刚放出新票：' + big.map(e=>e.text).join('　|　') + '　—— 马上去 12306 App！';
+        beep();
+      }
+    }
+    fresh.forEach(e=>seen.add(e.id));
+    first = false;
+    localStorage.setItem('seenEv', JSON.stringify([...seen].slice(-200)));
+
+    document.getElementById('ev').innerHTML = ev.length
+      ? ev.map(e=>'<div>'+(e.big?'<span class="new">'+e.time+'　'+e.text+'</span>'
+                            :e.time+'　'+e.text)+'</div>').join('')
+      : '<div class="empty">暂无</div>';
+  }).catch(e=>{
+    document.getElementById('st').textContent='连接失败，服务可能已停止';
+  });
+}
+tick();
+setInterval(tick, 30000);
+</script>
+</body>
+</html>
