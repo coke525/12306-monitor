@@ -14,3 +14,13 @@ dist2/
 build2/
 _stations_all.json
 cleanup_repo.py
+_notify.py
+board.html
+g7902_log.txt
+g7902_monitor.py
+g7902_snapshot.json
+push_github.bat
+setup_github.py
+ticket_board.py
+transfer_finder.py
+push_via_api.py
