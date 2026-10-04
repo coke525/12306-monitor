@@ -7,3 +7,9 @@ board_run.log
 _scan.txt
 _port.txt
 __pycache__/
+dist/
+build_tmp/
+"12306监控工具/"
+dist2/
+build2/
+_stations_all.json
