@@ -1,0 +1,40 @@
+{
+  "_怎么用": "改完这个文件提交到 GitHub 就生效，不用动代码。下面每一项都能改。",
+  "_电报码": "平顶山 PEN / 平顶山西 PDF / 宝丰 BFF / 南阳 NFF / 郑州 ZZF / 郑州东 ZAF / 郑州航空港 ZIF / 焦作 JOF / 焦作西 JIF",
+
+  "dates": ["2026-10-06", "2026-10-07"],
+
+  "date_prefs": {
+    "2026-10-06": {
+      "dep_from": "09:00",
+      "dep_to": "17:30",
+      "arr_zz_by": "18:10",
+      "final_by": "20:00",
+      "_说明": "9点后出发，20:00前必须到焦作西"
+    },
+    "2026-10-07": {
+      "dep_from": "09:00",
+      "dep_to": "10:00",
+      "arr_zz_by": null,
+      "final_by": "16:00",
+      "_说明": "9-10点出发，16:00前必须到焦作西"
+    }
+  },
+
+  "origins": ["PDF", "BFF", "PEN"],
+  "dest": "JIF",
+  "transfer_cities": ["ZZF", "ZAF", "ZIF"],
+  "via": "JOF",
+
+  "scan_mode": "fast",
+  "_scan_mode说明": "fast=只扫主干10条线路(约40秒一轮,适合高频扫描)；full=扫全部23条(含航空港/买长乘短,约90秒)",
+
+  "only_seated": false,
+  "_only_seated说明": "true=只推全程有座的方案；false=无座也算(票多,抢得到)",
+
+  "stations": {
+    "PEN": "平顶山", "PDF": "平顶山西", "BFF": "宝丰",
+    "NFF": "南阳", "ZZF": "郑州", "ZAF": "郑州东", "ZIF": "郑州航空港",
+    "JOF": "焦作", "JIF": "焦作西"
+  }
+}
