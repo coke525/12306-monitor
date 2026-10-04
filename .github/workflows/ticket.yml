@@ -41,7 +41,7 @@ jobs:
           for i in 1 2 3; do
             echo "=== 第 $i 轮  $(date -u +'%H:%M:%S') UTC ==="
             python cloud_monitor.py
-            if [ $i -lt 3 ]; then sleep 60; fi
+            if [ $i -lt 3 ]; then sleep 15; fi
           done
 
       - name: 回写状态快照
