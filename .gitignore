@@ -24,3 +24,6 @@ setup_github.py
 ticket_board.py
 transfer_finder.py
 push_via_api.py
+upload_binary.py
+dist3/
+build3/
