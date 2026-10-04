@@ -73,6 +73,13 @@ def split_codes(s):
     return [x.strip().upper() for x in (s or "").replace("，", ",").split(",") if x.strip()]
 
 
+def station_map():
+    """内置站名表 + monitor_config.json 里的全量电报码（3404 个站）"""
+    st = dict(getattr(tm, "STATION_NAME", {}) or {})
+    st.update(load_cfg().get("stations") or {})
+    return st
+
+
 def gh(method, path, token, payload=None):
     """GitHub REST 调用"""
     d = None
@@ -165,6 +172,18 @@ class App:
         ttk.Label(btns, text="日期必须和上面窗口成对出现；只填日期不加窗口 → 那天不会推送",
                   foreground="#a00").pack(side="left", padx=12)
 
+        # ---------- 查车站代码 ----------
+        qbox = ttk.LabelFrame(root, text=" 查车站代码（输中文站名或三字母代码，全国车站都能查）")
+        qbox.pack(fill="x", padx=10, pady=6)
+        self.stations = station_map()
+        self.v_q = tk.StringVar()
+        self.q_res = tk.StringVar(value="共 %d 个车站已内置" % len(self.stations))
+        e = ttk.Entry(qbox, textvariable=self.v_q, width=18)
+        e.pack(side="left", padx=(10, 4), pady=8)
+        e.bind("<Return>", lambda ev: self.on_query())
+        ttk.Button(qbox, text="查", command=self.on_query, width=4).pack(side="left")
+        ttk.Label(qbox, textvariable=self.q_res, foreground="#06c").pack(side="left", padx=10)
+
         # ---------- 选项 + 凭据 ----------
         obox = ttk.Frame(root)
         obox.pack(fill="x", padx=10, pady=6)
@@ -211,7 +230,25 @@ class App:
         sys.stdout = TextOut(self.out)
         sys.stderr = TextOut(self.out)
         self.say("就绪。改完点「保存配置」，要云端生效再点「同步到 GitHub」。\n")
-        self.say("车站速查：" + "  ".join("%s=%s" % (k, v) for k, v in tm.STATION_NAME.items()) + "\n\n")
+        self.say("常用站：" + "  ".join(
+            "%s=%s" % (k, self.stations[k]) for k in
+            ["PEN", "PDF", "BFF", "NFF", "ZZF", "ZAF", "ZIF", "JOF", "JIF", "NYF"]
+            if k in self.stations) + "\n")
+        self.say("想查别的站，用上面的「查车站代码」框，输中文名即可。\n\n")
+
+    def on_query(self):
+        kw = self.v_q.get().strip()
+        if not kw:
+            return
+        hits = [(k, v) for k, v in self.stations.items() if kw in v]
+        if not hits and len(kw) <= 4:          # 也支持反过来：输代码查站名
+            hits = [(k, v) for k, v in self.stations.items() if kw.upper() in k]
+        hits.sort(key=lambda x: len(x[1]))
+        if not hits:
+            self.q_res.set("没找到「%s」，换个说法试试（如「洛阳」不要带「站」）" % kw)
+        else:
+            self.q_res.set("  ".join("%s=%s" % (k, v) for k, v in hits[:10])
+                           + ("  …共 %d 个" % len(hits) if len(hits) > 10 else ""))
 
     # ---- 表格 ----
     def add_row(self, date, p):
