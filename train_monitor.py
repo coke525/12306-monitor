@@ -130,6 +130,79 @@ SEAT_FIELDS = [(32, "商务座"), (31, "一等座"), (30, "二等座"), (26, "�
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SNAPSHOT = os.path.join(BASE_DIR, "train_snapshot.json")
 LOGFILE = os.path.join(BASE_DIR, "train_log.txt")
+CONFIG_FILE = os.path.join(BASE_DIR, "monitor_config.json")
+
+# 是否只接受有座方案（由 monitor_config.json 的 only_seated 控制）
+ONLY_SEATED = False
+# fast=只扫主干区间，full=连支线/买长乘短一起扫
+SCAN_MODE = "fast"
+FAST_MID = ("ZZF", "ZAF")     # fast 模式下只保留这两个郑州换乘站
+
+
+def rebuild_legs():
+    """站点配置变了就重算要扫描的区间组合"""
+    global LEG1, LEG2, LEG3
+    LEG1 = [(o, m) for o in ORIGINS for m in MID1 + [VIA, DEST]]
+    LEG2 = [(m, d) for m in MID1 for d in (VIA, DEST)]
+    LEG3 = [(VIA, DEST)]
+
+
+def load_config():
+    """读 monitor_config.json 覆盖内置默认值；文件不存在就用代码里的默认。
+
+    改行程 = 改这个文件，不用动代码：
+      dates / date_prefs   日期与时间窗口
+      origins / dest       出发站与终点（电报码）
+      transfer_cities      允许换乘的城市车站
+      via                  二次换乘点
+      scan_mode            fast 快扫 / full 全扫
+      only_seated          true=只推全程有座
+    """
+    global DATES, DATE_PREF, ORIGINS, MID1, VIA, DEST
+    global EXTRA_WATCH, ONLY_SEATED, SCAN_MODE
+
+    if not os.path.exists(CONFIG_FILE):
+        return False
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as fp:
+            cfg = json.load(fp) or {}
+    except Exception as e:      # noqa: BLE001
+        log("配置文件读取失败，用内置默认: %s" % e)
+        return False
+
+    if cfg.get("dates"):
+        DATES = [str(x) for x in cfg["dates"]]
+    if cfg.get("date_prefs"):
+        DATE_PREF = {}
+        for k, v in cfg["date_prefs"].items():
+            if isinstance(v, dict):
+                DATE_PREF[str(k)] = v
+    if cfg.get("origins"):
+        ORIGINS = [str(x) for x in cfg["origins"]]
+    if cfg.get("transfer_cities"):
+        MID1 = [str(x) for x in cfg["transfer_cities"]]
+    if cfg.get("dest"):
+        DEST = str(cfg["dest"])
+    if cfg.get("via"):
+        VIA = str(cfg["via"])
+    if cfg.get("stations"):
+        for k, v in cfg["stations"].items():
+            if isinstance(v, str):
+                STATION_NAME[str(k)] = v
+
+    SCAN_MODE = str(cfg.get("scan_mode", "fast")).lower()
+    ONLY_SEATED = bool(cfg.get("only_seated", False))
+    if SCAN_MODE == "fast":
+        MID1 = [m for m in MID1 if m in FAST_MID] or MID1
+        EXTRA_WATCH = []
+    else:
+        ew = cfg.get("extra_watch") or [("NFF", "ZZF")]
+        EXTRA_WATCH = [tuple(x) for x in ew if isinstance(x, (list, tuple))]
+
+    rebuild_legs()
+    log("已载入配置  日期=%s  出发=%s  终点=%s  模式=%s  只看有座=%s"
+        % (",".join(DATES), "/".join(ORIGINS), sname(DEST), SCAN_MODE, ONLY_SEATED))
+    return True
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -387,13 +460,16 @@ def fmt(k, v):
 
 
 def main():
+    load_config()                       # 先读 monitor_config.json，覆盖默认行程
     ap = argparse.ArgumentParser()
     ap.add_argument("--showall", action="store_true")
-    ap.add_argument("--dates", default=",".join(DATES))
+    ap.add_argument("--dates", default=None,
+                    help="不传就用 monitor_config.json 里的 dates")
     ap.add_argument("--nopush", action="store_true", help="只记录不推微信")
     args = ap.parse_args()
 
-    dates = [x.strip() for x in args.dates.split(",") if x.strip()]
+    dates = ([x.strip() for x in args.dates.split(",") if x.strip()]
+             if args.dates else list(DATES))
     routes = LEG1 + LEG2 + LEG3 + EXTRA_WATCH
     log("开始扫描  日期=%s  路线=%d 条（含二次换乘+买长乘短观察）"
         % (",".join(dates), len(routes)))
@@ -403,6 +479,10 @@ def main():
     preferred = {k: v for k, v in available.items() if leg_pref_ok(k[0], k[1], k[2], v)}
     plans = build_plans(rows, dates)
     hit_plans = [p for p in plans if p["hit"]]
+    if ONLY_SEATED:
+        # 只保留每一段都有真正座位的方案
+        hit_plans = [p for p in hit_plans
+                     if all(has_seat(l["seats"]) for l in p["legs"])]
 
     if args.showall:
         log("当前有票车次 %d 趟 / 扫描结果 %d 趟" % (len(available), len(rows)))
