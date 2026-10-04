@@ -132,24 +132,53 @@ class App:
         # ---------- 行程 ----------
         box = ttk.LabelFrame(root, text=" 行程（填电报码，多个用逗号隔开）")
         box.pack(fill="x", padx=10, pady=(10, 6))
-        self.v_origins = tk.StringVar(value=",".join(cfg.get("origins") or ["PDF", "BFF", "PEN"]))
+        def joins(v):
+            """配置里可能是字符串也可能是列表，统一拼成逗号串填进输入框"""
+            if isinstance(v, (list, tuple)):
+                return ",".join(str(x) for x in v)
+            return str(v or "")
+
+        self.v_origins = tk.StringVar(value=joins(cfg.get("origins") or ["PDF", "BFF", "PEN"]))
         self.v_dest = tk.StringVar(value=cfg.get("dest") or "JIF")
-        self.v_mid = tk.StringVar(value=",".join(cfg.get("transfer_cities") or ["ZZF", "ZAF", "ZIF"]))
-        self.v_via = tk.StringVar(value=cfg.get("via") or "JOF")
-        self.v_fastmid = tk.StringVar(value=",".join(cfg.get("fast_mid") or ["ZZF", "ZAF"]))
-        for i, (label, var, tip) in enumerate([
-            ("出发站", self.v_origins, "可接受的所有出发站"),
+        self.v_mid = tk.StringVar(value=joins(cfg.get("transfer_cities") or ["ZZF", "ZAF", "ZIF"]))
+        self.v_via = tk.StringVar(value=joins(cfg.get("via") or "JOF"))
+        self.v_via2 = tk.StringVar(value=joins(cfg.get("via2")))
+        self.v_city = tk.StringVar(value=joins(cfg.get("city_stations") or cfg.get("via") or "JOF"))
+        self.v_fastmid = tk.StringVar(value=joins(cfg.get("fast_mid") or ["ZZF", "ZAF"]))
+        self.v_mt = tk.StringVar(value=str(cfg.get("max_transfers") or 3))
+
+        # 第一行：主干行程
+        row1 = [
+            ("出发站", self.v_origins, "可接受的所有出发站，多个用逗号隔开"),
             ("终点", self.v_dest, "最终目的地"),
-            ("换乘城市", self.v_mid, "第一次换乘允许的车站"),
-            ("二次换乘", self.v_via, "没有就填成和终点一样"),
+            ("换乘城市", self.v_mid, "第一次换乘允许的车站（层1）"),
             ("主干换乘站", self.v_fastmid, "fast 模式只扫这几个，通常取换乘城市前两个"),
-        ]):
-            ttk.Label(box, text=label).grid(row=0, column=i * 2, padx=(10, 3), pady=8, sticky="e")
+        ]
+        for i, (label, var, tip) in enumerate(row1):
+            ttk.Label(box, text=label).grid(row=0, column=i * 2, padx=(10, 3), pady=(8, 2), sticky="e")
             e = ttk.Entry(box, textvariable=var, width=14)
             e.grid(row=0, column=i * 2 + 1, padx=(0, 6), sticky="w")
             e.bind("<Enter>", lambda ev, t=tip: self.hint(t))
-        ttk.Label(box, text="路线 = 出发站 → 换乘城市 → 二次换乘 → 终点（1~3 段）",
-                  foreground="#888").grid(row=1, column=0, columnspan=10, sticky="w", padx=10, pady=(0, 6))
+
+        # 第二行：多换乘配置
+        row2 = [
+            ("二次换乘", self.v_via, "第二次换乘站（层2），可填多个：JOF,XXF。不想要就留空"),
+            ("三次换乘", self.v_via2, "第三次换乘站（层3），留空=最多两次换乘。填了才启用 4 段方案"),
+            ("城际站", self.v_city, "这些站换乘只需 20 分钟缓冲（其余站 25~45 分）"),
+        ]
+        for i, (label, var, tip) in enumerate(row2):
+            ttk.Label(box, text=label).grid(row=1, column=i * 2, padx=(10, 3), pady=4, sticky="e")
+            e = ttk.Entry(box, textvariable=var, width=14)
+            e.grid(row=1, column=i * 2 + 1, padx=(0, 6), sticky="w")
+            e.bind("<Enter>", lambda ev, t=tip: self.hint(t))
+        ttk.Label(box, text="最多换乘").grid(row=1, column=6, padx=(10, 3), sticky="e")
+        mtc = ttk.Combobox(box, textvariable=self.v_mt, values=["1", "2", "3"], width=4)
+        mtc.grid(row=1, column=7, sticky="w")
+        mtc.bind("<Enter>", lambda ev: self.hint(
+            "结果里最多展示几次换乘：1=只看直达/一次换乘（最快）；3=连三次换乘也算（要配三次换乘站）"))
+
+        ttk.Label(box, text="路线 = 出发站 → 换乘城市 → 二次换乘 → 三次换乘 → 终点（中间层可跳过，最多 4 段）",
+                  foreground="#888").grid(row=2, column=0, columnspan=10, sticky="w", padx=10, pady=(2, 6))
 
         # ---------- 日期与时段 ----------
         dbox = ttk.LabelFrame(root, text=" 日期与时间窗口（每天一行；留空 = 不限制）")
@@ -297,7 +326,13 @@ class App:
         cfg["origins"] = split_codes(self.v_origins.get())
         cfg["dest"] = self.v_dest.get().strip().upper()
         cfg["transfer_cities"] = split_codes(self.v_mid.get())
-        cfg["via"] = self.v_via.get().strip().upper()
+        cfg["via"] = split_codes(self.v_via.get())
+        cfg["via2"] = split_codes(self.v_via2.get())
+        cfg["city_stations"] = split_codes(self.v_city.get())
+        try:
+            cfg["max_transfers"] = max(1, min(3, int(str(self.v_mt.get()).strip() or 3)))
+        except ValueError:
+            cfg["max_transfers"] = 3
         cfg["fast_mid"] = split_codes(self.v_fastmid.get())
         cfg["scan_mode"] = self.v_mode.get()
         cfg["only_seated"] = self.v_seated.get()
