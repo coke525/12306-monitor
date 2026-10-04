@@ -28,7 +28,9 @@ import json
 import urllib.parse
 import urllib.request
 
-BASE = os.path.dirname(os.path.abspath(__file__))
+# 冻结成 exe 后用 exe 所在目录（打包后 __file__ 指向临时的 _MEIPASS）
+BASE = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+    else os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 
 import train_monitor as tm   # noqa: E402
