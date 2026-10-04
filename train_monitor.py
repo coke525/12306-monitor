@@ -77,20 +77,25 @@ STATION_NAME = {
 }
 
 # ---- 换乘网络 ----------------------------------------------------------
-# 用户可接受最多两次换乘，所以路径最多三段：
-#   家 -> 郑州同城 -> 焦作 -> 焦作西
-# 焦作 -> 焦作西 实测一天 10 趟城际、全程有票、只要 9 分钟，所以这条路完全通。
-ORIGINS = ["PDF", "BFF", "PEN"]          # 可接受的出发站
-MID1 = ["ZZF", "ZAF", "ZIF"]             # 郑州同城换乘站
-VIA = "JOF"                              # 焦作（二次换乘点）
-DEST = "JIF"                             # 焦作西（终点）
+# 采用「分层」模型，路线只能从低层流向高层，中间层可以整层跳过：
+#
+#   层0 出发站  ->  层1 一次换乘  ->  层2 二次换乘  ->  层3 三次换乘  ->  层终点
+#
+# 能走几段 = 层数-1，所以想支持几次换乘就配几层：
+#   只配 层1            -> 最多 1 次换乘（2 段）
+#   配 层1+层2          -> 最多 2 次换乘（3 段）
+#   配 层1+层2+层3      -> 最多 3 次换乘（4 段）
+# 每层都可以填多个站，程序会自动穷举所有组合（含跳过中间层的直达走法）。
+ORIGINS = ["PDF", "BFF", "PEN"]          # 层0：可接受的出发站
+MID1 = ["ZZF", "ZAF", "ZIF"]             # 层1：一次换乘站
+VIA = ["JOF"]                            # 层2：二次换乘站（可多个）
+VIA2 = []                                # 层3：三次换乘站（留空=最多两次换乘）
+DEST = "JIF"                             # 终点：焦作西
+MAX_TRANSFERS = 3                        # 结果里最多展示几次换乘（<=2 可提速）
 
-# 第一段：家 -> 郑州同城 / 焦作 / 焦作西
-LEG1 = [(o, m) for o in ORIGINS for m in MID1 + [VIA, DEST]]
-# 第二段：郑州同城 -> 焦作 / 焦作西
-LEG2 = [(m, d) for m in MID1 for d in (VIA, DEST)]
-# 第三段：焦作 -> 焦作西
-LEG3 = [(VIA, DEST)]
+# 扫描用路线集合，由 rebuild_legs() 自动生成（兼容旧名的三段拆分）
+LEG1, LEG2, LEG3 = [], [], []
+ROUTES = []
 
 # 额外观察：买长乘短。K258/K5346 都是「南阳 -> 宝丰 -> 郑州」，
 # 宝丰无票时若南阳段放票，可以买 南阳->郑州 在宝丰上车（铁路允许中途站上车，未乘区间不退）。
@@ -100,6 +105,8 @@ EXTRA_WATCH = [("NFF", "ZZF")]
 
 ZZ_GROUP = {"ZZF", "ZAF", "ZIF", "EZF", "XPF"}
 TAXI_MIN = 20            # 万一焦作->焦作西没赶上火车，打车兜底的分钟数
+# 短途城际之间换乘只需 20 分钟（默认=所有二次换乘站，可用 city_stations 覆盖）
+CITI_STATIONS = set()
 
 # 换乘缓冲（分钟）—— 按前后车类型给不同余量，普速晚点风险大所以留更多
 BUF_G2G = 25             # 动车/高铁 -> 动车/高铁（同站）
@@ -117,7 +124,7 @@ def is_slow(code):
 
 def buffer_need(prev_code, next_code, station):
     """给定前后车次与换乘站，返回建议的最小换乘间隔"""
-    if station == VIA:
+    if station in CITI_STATIONS:
         return BUF_CITI
     if is_slow(prev_code):
         return BUF_K2X
@@ -140,6 +147,7 @@ CONFIG_FILE = os.path.join(BASE_DIR, "monitor_config.json")
 # 是否只接受有座方案（由 monitor_config.json 的 only_seated 控制）
 ONLY_SEATED = False
 # fast=只扫主干区间，full=连支线/买长乘短一起扫
+MAX_ROUTES = 70                       # 超过这个数就告警：一轮扫描会明显变慢
 SCAN_MODE = "fast"
 # fast 模式只扫「主干换乘站」以减少请求数。默认郑州两站；
 # 换行程时在 monitor_config.json 写 "fast_mid": ["XXF", "YYF"] 即可，
@@ -147,12 +155,60 @@ SCAN_MODE = "fast"
 FAST_MID = ["ZZF", "ZAF"]
 
 
+def _layers():
+    """按层号从低到高返回换乘网络，最后一层固定是终点站。
+
+    空层会被丢掉（比如不配 VIA2 就没有第三次换乘），
+    剩下的层数直接决定「最多几次换乘」。
+    """
+    layers = [[str(x) for x in ORIGINS] if not isinstance(ORIGINS, str)
+              else [ORIGINS]]
+    for lay in (MID1, VIA, VIA2):
+        nodes = [str(x).strip().upper() for x in (lay or []) if str(x).strip()]
+        seen, clean = set(), []
+        for n in nodes:
+            if n not in seen:
+                seen.add(n)
+                clean.append(n)
+        if clean:
+            layers.append(clean)
+    dest = str(DEST).strip().upper()
+    layers.append([dest])
+    # 去重：中途出现的终点站会被后面的直连绕开，先剔除以免绕圈
+    for lay in layers[:-1]:
+        for i in range(len(lay) - 1, -1, -1):
+            if lay[i] == dest:
+                del lay[i]
+    return [lay for lay in layers if lay] or [[dest]]
+
+
+def max_segs():
+    """当前网络最多能拼几段（含首尾），并受 MAX_TRANSFERS 约束"""
+    return min(len(_layers()) - 1, int(MAX_TRANSFERS) + 1)
+
+
 def rebuild_legs():
-    """站点配置变了就重算要扫描的区间组合"""
-    global LEG1, LEG2, LEG3
-    LEG1 = [(o, m) for o in ORIGINS for m in MID1 + [VIA, DEST]]
-    LEG2 = [(m, d) for m in MID1 for d in (VIA, DEST)]
-    LEG3 = [(VIA, DEST)]
+    """站点配置变了就重算要扫描的区间组合。
+
+    边 = 任意两层之间的所有节点配对（低层 -> 高层），
+    中间层能否跳过由穷举阶段决定，扫描阶段先把边全扫回来。
+    """
+    global LEG1, LEG2, LEG3, ROUTES
+    layers = _layers()
+    edges, seen = [], set()
+    for i in range(len(layers) - 1):
+        for j in range(i + 1, len(layers)):
+            for a in layers[i]:
+                for b in layers[j]:
+                    if a == b or (a, b) in seen:
+                        continue
+                    seen.add((a, b))
+                    edges.append((a, b))
+    ROUTES = edges
+    # LEG1/2/3 只用于兼容旧代码（按出发层分组），三者相加 == ROUTES
+    LEG1 = [e for e in edges if any(e[0] in layers[k] for k in (0,))]
+    LEG2 = [e for e in edges if len(layers) > 1 and e[0] in layers[1]]
+    LEG3 = [e for e in edges if e not in LEG1 and e not in LEG2]
 
 
 def load_config():
@@ -166,8 +222,9 @@ def load_config():
       scan_mode            fast 快扫 / full 全扫
       only_seated          true=只推全程有座
     """
-    global DATES, DATE_PREF, ORIGINS, MID1, VIA, DEST
+    global DATES, DATE_PREF, ORIGINS, MID1, VIA, VIA2, DEST
     global EXTRA_WATCH, ONLY_SEATED, SCAN_MODE, FAST_MID
+    global MAX_TRANSFERS, CITI_STATIONS
 
     if not os.path.exists(CONFIG_FILE):
         return False
@@ -191,8 +248,28 @@ def load_config():
         MID1 = [str(x) for x in cfg["transfer_cities"]]
     if cfg.get("dest"):
         DEST = str(cfg["dest"])
+    def as_list(v):
+        """配置里既可以写单个字符串 'JOF'，也可以写列表 ['JOF','XXF']"""
+        if not v:
+            return []
+        if isinstance(v, str):
+            return [x.strip().upper() for x in v.replace("，", ",").split(",")
+                    if x.strip()]
+        return [str(x).strip().upper() for x in v if str(x).strip()]
+
     if cfg.get("via"):
-        VIA = str(cfg["via"])
+        VIA = as_list(cfg["via"])
+    if cfg.get("via2"):
+        VIA2 = as_list(cfg["via2"])
+    if cfg.get("max_transfers") is not None:
+        try:
+            MAX_TRANSFERS = max(1, int(cfg["max_transfers"]))
+        except (TypeError, ValueError):
+            pass
+    if cfg.get("city_stations"):
+        CITI_STATIONS = set(as_list(cfg["city_stations"]))
+    else:
+        CITI_STATIONS = set(VIA) | set(VIA2)
     if cfg.get("stations"):
         for k, v in cfg["stations"].items():
             if isinstance(v, str):
@@ -206,7 +283,10 @@ def load_config():
     elif MID1:
         FAST_MID = list(MID1[:2])
     if SCAN_MODE == "fast":
+        # 组合会爆炸，fast 下每层只保留少量主干站，防止一轮扫描拖到几分钟
         MID1 = [m for m in MID1 if m in FAST_MID] or MID1
+        VIA = VIA[:2]
+        VIA2 = []
         EXTRA_WATCH = []
     else:
         ew = cfg.get("extra_watch") or [("NFF", "ZZF")]
@@ -215,6 +295,13 @@ def load_config():
     rebuild_legs()
     log("已载入配置  日期=%s  出发=%s  终点=%s  模式=%s  只看有座=%s"
         % (",".join(DATES), "/".join(ORIGINS), sname(DEST), SCAN_MODE, ONLY_SEATED))
+    log("换乘网络  %s → %s   最多 %d 次换乘，需扫描 %d 条区间"
+        % (" → ".join("/".join(x) for x in _layers()),
+           sname(DEST), max_segs() - 1, len(ROUTES)))
+    if len(ROUTES) > MAX_ROUTES:
+        log("WARN 扫描区间过多（%d 条 > %d），一轮会很慢，"
+            "建议减少出发站/换乘站，或保持 scan_mode=fast"
+            % (len(ROUTES), MAX_ROUTES))
     return True
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -387,12 +474,24 @@ def mk_plan(date, pref, legs):
 
 
 def build_plans(rows, dates):
-    """穷举 直达 / 一次换乘 / 两次换乘 的全部可行组合"""
+    """穷举换乘网络里的全部可行路径。
+
+    层数决定上限：N 层最多 N-1 段（即 N-2 次换乘），中间层可整层跳过，
+    所以「直达 / 一次换乘 / 两次换乘 / 三次换乘」都在同一个 DFS 里自然产生。
+    """
     plans = []
+    layers = _layers()
+    nlayer = len(layers)
+    seg_cap = max_segs()
+
     for d in dates:
         pref = DATE_PREF.get(d, {})
+        cache = {}
 
         def get(f, t):
+            """某天某区间所有有票的车次（结果缓存，DFS 里会反复问）"""
+            if (f, t) in cache:
+                return cache[(f, t)]
             out = []
             for k, v in rows.items():
                 if k[0] == d and k[1] == f and k[2] == t and v["total"] > 0:
@@ -402,6 +501,7 @@ def build_plans(rows, dates):
                         "code": k[3], "start": v["start"],
                         "arrive": v["arrive"], "seats": v["seats"],
                     })
+            cache[(f, t)] = out
             return out
 
         seen = set()
@@ -416,29 +516,23 @@ def build_plans(rows, dates):
             seen.add(key)
             plans.append(p)
 
-        # 一段：家 -> 焦作西（直达）
-        for o in ORIGINS:
-            for a in get(o, DEST):
-                add([a])
-        # 两段：家 -> 郑州同城 -> 焦作西
-        for o in ORIGINS:
-            for m in MID1:
-                for a in get(o, m):
-                    for b in get(m, DEST):
-                        if b["code"] == a["code"]:
-                            continue          # 同一趟车，已被直达覆盖
-                        add([a, b])
-        # 三段：家 -> 郑州同城 -> 焦作 -> 焦作西
-        for o in ORIGINS:
-            for m in MID1:
-                for a in get(o, m):
-                    for b in get(m, VIA):
-                        if b["code"] == a["code"]:
-                            continue
-                        for c in get(VIA, DEST):
-                            if c["code"] == b["code"]:
-                                continue      # 同车次已由两段覆盖
-                            add([a, b, c])
+        def walk(li, node, legs):
+            """当前停在 layer[li] 的 node 站，legs 是已走路径"""
+            if node == DEST:
+                add(legs)
+                return
+            if len(legs) >= seg_cap:
+                return
+            used = {l["code"] for l in legs}
+            for nj in range(li + 1, nlayer):
+                for nxt in layers[nj]:
+                    for leg in get(node, nxt):
+                        if leg["code"] in used:
+                            continue          # 同一趟车不停两次，交给下层去重
+                        walk(nj, nxt, legs + [leg])
+
+        for o in layers[0]:
+            walk(0, o, [])
 
     # 排序：命中优先 → 换乘次数少 → 总等待时间短（等 4 小时不算"合理安排"）→ 到得早
     plans.sort(key=lambda x: (not x["hit"], x["nlegs"],
@@ -483,8 +577,11 @@ def main():
 
     dates = ([x.strip() for x in args.dates.split(",") if x.strip()]
              if args.dates else list(DATES))
-    routes = LEG1 + LEG2 + LEG3 + EXTRA_WATCH
-    log("开始扫描  日期=%s  路线=%d 条（含二次换乘+买长乘短观察）"
+    routes = ROUTES + EXTRA_WATCH
+    if not routes:
+        rebuild_legs()
+        routes = ROUTES + EXTRA_WATCH
+    log("开始扫描  日期=%s  路线=%d 条（含买长乘短观察）"
         % (",".join(dates), len(routes)))
     rows = scan(dates, routes)
 
