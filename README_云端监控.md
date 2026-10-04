@@ -14,8 +14,17 @@ train_monitor.py               扫描 12306 + 拼换乘方案 + 判定是否符�
 push.py                        微信推送（被 cloud_monitor 引用，必须传）
 monitor_config.json            ★ 唯一的配置文件，改行程只动它
 monitor_gui.py                 桌面配置工具的源码（12306Monitor.exe 就是它打包的）
+12306Monitor.exe               桌面配置工具本体（Windows，双击运行）
+使用说明.txt                    上面那个 exe 的操作说明
 cloud_state.json               上轮余票快照，由脚本自动提交，别手改
 ```
+
+### 怎么拿到 exe 到本地用
+
+在仓库文件列表里点 `12306Monitor.exe` → 右上角 **Download raw file**（或 `···` → Download）。
+
+**下载后必须和 `monitor_config.json` 放在同一个文件夹里**，单独运行会读不到配置。
+最简单的做法：新建一个空文件夹，把这两个文件都丢进去，双击 exe 即可。
 
 改行程 / 改时段**只用动 `monitor_config.json`**。更省事的做法是用
 `12306Monitor.exe`：界面里填完 →「保存配置」→「同步到 GitHub」。
