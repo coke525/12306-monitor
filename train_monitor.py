@@ -127,7 +127,12 @@ def buffer_need(prev_code, next_code, station):
 
 SEAT_FIELDS = [(32, "商务座"), (31, "一等座"), (30, "二等座"), (26, "无座")]
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 打包成 exe 后 __file__ 指向临时解压目录，配置会"写了找不到"；
+# 冻结时用 exe 所在目录，让配置/快照落在 exe 旁边，方便用户直接改。
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SNAPSHOT = os.path.join(BASE_DIR, "train_snapshot.json")
 LOGFILE = os.path.join(BASE_DIR, "train_log.txt")
 CONFIG_FILE = os.path.join(BASE_DIR, "monitor_config.json")
