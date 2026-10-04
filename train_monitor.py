@@ -136,7 +136,10 @@ CONFIG_FILE = os.path.join(BASE_DIR, "monitor_config.json")
 ONLY_SEATED = False
 # fast=只扫主干区间，full=连支线/买长乘短一起扫
 SCAN_MODE = "fast"
-FAST_MID = ("ZZF", "ZAF")     # fast 模式下只保留这两个郑州换乘站
+# fast 模式只扫「主干换乘站」以减少请求数。默认郑州两站；
+# 换行程时在 monitor_config.json 写 "fast_mid": ["XXF", "YYF"] 即可，
+# 不写就用 transfer_cities 全部（见 load_config）。
+FAST_MID = ["ZZF", "ZAF"]
 
 
 def rebuild_legs():
@@ -159,7 +162,7 @@ def load_config():
       only_seated          true=只推全程有座
     """
     global DATES, DATE_PREF, ORIGINS, MID1, VIA, DEST
-    global EXTRA_WATCH, ONLY_SEATED, SCAN_MODE
+    global EXTRA_WATCH, ONLY_SEATED, SCAN_MODE, FAST_MID
 
     if not os.path.exists(CONFIG_FILE):
         return False
@@ -192,6 +195,11 @@ def load_config():
 
     SCAN_MODE = str(cfg.get("scan_mode", "fast")).lower()
     ONLY_SEATED = bool(cfg.get("only_seated", False))
+    # fast_mid 没写就默认取 transfer_cities 的前两个，避免换行程后仍被郑州两站裁掉
+    if cfg.get("fast_mid"):
+        FAST_MID = [str(x) for x in cfg["fast_mid"]]
+    elif MID1:
+        FAST_MID = list(MID1[:2])
     if SCAN_MODE == "fast":
         MID1 = [m for m in MID1 if m in FAST_MID] or MID1
         EXTRA_WATCH = []
@@ -446,8 +454,8 @@ def plan_text(p):
     else:
         buf = "无需换乘"
     risk = "　⚠偏紧" if p["tight"] else ""
-    return "%s%s %s（%s，%s到焦作西%s）" % (
-        p["seat_tag"], p["date"], segs, buf, p["final"], risk)
+    return "%s%s %s（%s，%s到%s%s）" % (
+        p["seat_tag"], p["date"], segs, buf, p["final"], sname(DEST), risk)
 
 
 def fmt(k, v):
@@ -542,11 +550,11 @@ def main():
         if not args.nopush:
             # 只推最靠前的 2 条：极简推送走 GET，内容必须短
             top = new_hit[:2]
-            extra = ("（另有 %d 个方案，见看板）" % (len(new_hit) - len(top))
+            extra = ("（另有 %d 个方案）" % (len(new_hit) - len(top))
                      if len(new_hit) > len(top) else "")
             body = "".join(
                 "<p><b>%s 出发　%s</b>（你要的窗口 %s-%s）<br>%s<br>"
-                "换乘间隔 %s<br>预计 <b>%s</b> 到焦作西</p>" % (
+                "换乘间隔 %s<br>预计 <b>%s</b> 到%s</p>" % (
                     p["date"][5:], p["seat_tag"],
                     DATE_PREF.get(p["date"], {}).get("dep_from", ""),
                     DATE_PREF.get(p["date"], {}).get("dep_to", ""),
@@ -559,7 +567,7 @@ def main():
                         for i, l in enumerate(p["legs"])),
                     "、".join(["%d分(建议≥%d)" % (g, n)
                                for g, n in zip(p["buffers"], p["needs"])]) or "无需换乘",
-                    p["final"])
+                    p["final"], sname(DEST))
                 for p in top) + ("<p>%s</p>" % extra if extra else "")
             any_seat = any(has_seat(l["seats"]) for p in new_hit for l in p["legs"])
             title = "12306 有票了！马上下单" + ("（有座）" if any_seat else "（仅无座）")
@@ -569,8 +577,8 @@ def main():
                 segs = " + ".join(
                     "%s %s%s→%s%s" % (l["code"], l["from"], l["start"], l["to"], l["arrive"])
                     for l in p["legs"])
-                return "%s %s %s %s到焦作西" % (
-                    p["date"][5:], segs, p["seat_tag"], p["final"])
+                return "%s %s %s %s到%s" % (
+                    p["date"][5:], segs, p["seat_tag"], p["final"], sname(DEST))
 
             short = "【12306放票】" + short_of(top[0])
             if len(top) > 1:
