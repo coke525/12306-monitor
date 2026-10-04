@@ -18,7 +18,7 @@ concurrency:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 30
     permissions:
       contents: write           # 需要把状态快照提交回仓库
     steps:
@@ -30,9 +30,9 @@ jobs:
         with:
           python-version: "3.11"
 
-      # GitHub 的定时最小粒度是 5 分钟，所以在任务内部再循环 3 轮，
-      # 每轮间隔 60 秒 —— 实际扫描间隔约 85 秒
-      - name: 循环扫描（3 轮）
+      # GitHub 的定时调度经常丢，所以不依赖它：单次任务内部连续扫描 27 分钟，
+      # 每轮约 62 秒 + 间隔 15 秒 —— 只要一天触发几次就能近乎连续覆盖
+      - name: 连续扫描（最多 27 分钟）
         continue-on-error: true
         env:
           WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}
@@ -40,11 +40,21 @@ jobs:
           WXPUSHER_TOKEN: ${{ secrets.WXPUSHER_TOKEN }}
           WXPUSHER_UID: ${{ secrets.WXPUSHER_UID }}
           STATE_FILE: cloud_state.json
+          SCAN_SECONDS: "1620"
         run: |
-          for i in 1 2 3; do
-            echo "=== 第 $i 轮  $(date -u +'%H:%M:%S') UTC ==="
+          START=$(date +%s)
+          i=0
+          while true; do
+            NOW=$(date +%s)
+            ELAPSED=$((NOW - START))
+            if [ "$ELAPSED" -ge "$SCAN_SECONDS" ]; then
+              echo "已跑满 ${SCAN_SECONDS}s，结束（共 $i 轮）"
+              break
+            fi
+            i=$((i + 1))
+            echo "=== 第 $i 轮  已用 ${ELAPSED}s  $(date -u +'%H:%M:%S') UTC ==="
             python cloud_monitor.py
-            if [ $i -lt 3 ]; then sleep 15; fi
+            sleep 15
           done
 
       - name: 回写状态快照
