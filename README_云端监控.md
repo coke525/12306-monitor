@@ -3,19 +3,25 @@
 已经跑在 GitHub Actions 上：**每 5 分钟触发一次，任务内循环 3 轮，实际约 77 秒扫一次**，
 电脑关机也照扫，有新票直接推微信。
 
+> **想换到腾讯云函数 / 阿里云函数计算 / 自己的服务器？** 看 👉 [`部署指南.md`](部署指南.md)
+> 监控逻辑本身不绑定平台，换平台只是换"谁定时调用它"。
+> exe 里「部署平台」下拉选好点「生成部署包」，会自动整理好要上传的文件。
+
 ---
 
 ## 仓库里每个文件是干嘛的
 
 ```
-.github/workflows/ticket.yml   定时任务本体（cron + 3 轮循环）
+.github/workflows/ticket.yml   定时任务本体（GitHub Actions 用）
 cloud_monitor.py               云端入口：读环境变量凭据 + 跨次状态记忆
+cloud_function.py              云函数入口（腾讯云/阿里云/华为云通用）
 train_monitor.py               扫描 12306 + 拼换乘方案 + 判定是否符合你的窗口
 push.py                        微信推送（被 cloud_monitor 引用，必须传）
 monitor_config.json            ★ 唯一的配置文件，改行程只动它
 monitor_gui.py                 桌面配置工具的源码（12306Monitor.exe 就是它打包的）
 12306Monitor.exe               桌面配置工具本体（Windows，双击运行）
 使用说明.txt                    上面那个 exe 的操作说明
+部署指南.md                     四种部署平台的详细操作步骤
 cloud_state.json               上轮余票快照，由脚本自动提交，别手改
 ```
 
