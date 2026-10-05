@@ -420,15 +420,16 @@ class App:
                   foreground="#888").grid(row=2, column=0, columnspan=10, sticky="w", padx=10, pady=(2, 6))
 
         # ---------- 同行人（紧跟行程：同行人本来就是行程的一部分） ----------
-        cbox = ttk.LabelFrame(root, text=" 同行人（先一起坐，到分手站再分开；不加就是单人出行）")
+        cbox = ttk.LabelFrame(root, text=" 同行人（先一起坐一段再分开；他的终点、到达时间、换乘次数都能跟你不一样。不加就是单人出行）")
         cbox.pack(fill="x", padx=10, pady=6)
         self.crows = []
         # 表头和输入框放进同一个表格：列宽取二者较宽者，框用 sticky=ew 撑满列，
         # 二级标题就正好落在框的正上方（以前标题挂在外层，和框各算各的列宽才对不齐）
         self.cbody = ttk.Frame(cbox)
         self.cbody.pack(anchor="w", padx=6, pady=(6, 0))
-        chead = ["称呼", "他的终点", "分手站", "共同段要几张票", "他最晚到达"]
-        for i, (h, w) in enumerate(zip(chead, (90, 90, 148, 112, 100))):
+        chead = ["称呼", "他的终点", "分手站(可留空)", "共同段要几张票",
+                 "他最晚到达", "他最多换乘"]
+        for i, (h, w) in enumerate(zip(chead, (80, 86, 132, 106, 96, 92))):
             ttk.Label(self.cbody, text=h, foreground="#555").grid(
                 row=0, column=i, padx=4, pady=(0, 3), sticky="w")
             self.cbody.columnconfigure(i, minsize=w)
@@ -442,7 +443,8 @@ class App:
         cbtns.pack(anchor="w", padx=6, pady=6)
         ttk.Button(cbtns, text="+ 添加朋友", command=lambda: self.add_comp({})).pack(side="left")
         ttk.Button(cbtns, text="− 删最后一行", command=self.del_comp).pack(side="left", padx=6)
-        ttk.Label(cbtns, text="终点和分手站填电报码（用最上面的查询框查）；"
+        ttk.Label(cbtns, text="终点填电报码（用最上面的查询框查）；"
+                             "「分手站」留空 = 自动找所有可能的分手点；"
                              "「最晚到达」留空 = 跟主终点用同一个底线",
                   foreground="#a00").pack(side="left", padx=12)
 
@@ -596,21 +598,26 @@ class App:
 
     # ---- 同行人 ----
     def add_comp(self, c):
-        """一个同行人一行：称呼 / 他的终点 / 分手站 / 票数 / 他的最晚到达。
-        第 0 行是表头，数据从第 1 行开始。"""
+        """一个同行人一行：称呼/他的终点/分手站/票数/他的最晚到达/他的换乘上限。
+        第 0 行是表头，数据从第 1 行开始。
+        换几次乘、在哪分手都不用填 —— 程序会自动比对路线把所有组合找出来，
+        这几列只是用来筛掉你不想要的（比如不想让他倒车超过一次）。"""
         r = len(self.crows) + 1
         splits = c.get("split_at")
         if isinstance(splits, (list, tuple)):
             splits = ",".join(str(x) for x in splits)
+        mt = c.get("max_transfers")
         vs = [tk.StringVar(value=str(c.get("name") or "")),
               tk.StringVar(value=str(c.get("dest") or "").upper()),
               tk.StringVar(value=str(splits or "")),
               tk.StringVar(value=str(c.get("tickets") or 2)),
-              tk.StringVar(value=str(c.get("final_by") or ""))]
+              tk.StringVar(value=str(c.get("final_by") or "")),
+              tk.StringVar(value="不限" if mt is None else str(mt))]
         for i, (w, tip) in enumerate([
                 (10, "随便起个名字，推送里会显示「可与XX同行」"),
                 (10, "他最终要到的站。用最上面的查询框查电报码，如 洛阳龙门=LLF"),
-                (16, "两人在哪个站分开，可填多个用逗号隔开，如 ZZF,ZAF（哪个都算）"),
+                (14, "限定在哪站分开，多个用逗号隔开（ZZF,ZAF）。"
+                     "留空 = 不限，凡能同行一段的组合都给你列出来"),
         ]):
             e = ttk.Entry(self.cbody, textvariable=vs[i], width=w)
             e.grid(row=r, column=i, padx=4, pady=2, sticky="ew")
@@ -624,6 +631,12 @@ class App:
         fb.grid(row=r, column=4, padx=4, pady=2, sticky="ew")
         fb.bind("<Enter>", lambda ev: self.hint(
             "他到目的地的最晚时间，可以跟你的不一样。留空 = 跟上面主终点的底线相同"))
+        mt = ttk.Combobox(self.cbody, textvariable=vs[5],
+                          values=["不限", "0", "1", "2", "3"], width=6)
+        mt.grid(row=r, column=5, padx=4, pady=2, sticky="ew")
+        mt.bind("<Enter>", lambda ev: self.hint(
+            "他自己最多愿意倒几次车。0=他要直达，不限=能到就行。"
+            "你换几次跟他换几次互不相关，程序会各自穷举"))
         self.crows.append(vs)
 
     def del_comp(self):
@@ -680,17 +693,23 @@ class App:
                 continue                       # 整行空着就当没加
             if not dest:
                 raise ValueError("同行人「%s」没填终点站" % (name or "未命名"))
-            splits = split_codes(vs[2].get())
-            if not splits:
-                raise ValueError("同行人「%s」没填分手站（在哪个站分开）" % name)
             if dest == cfg["dest"]:
                 raise ValueError("同行人「%s」的终点和你的终点一样，不用单独加" % name)
             try:
-                tkts = max(1, int(str(vs[3].get()).strip() or 2))
+                tkts = max(2, int(str(vs[3].get()).strip() or 2))
             except ValueError:
                 tkts = 2
+            mts = str(vs[5].get()).strip()
+            if mts and mts != "不限":
+                try:
+                    mt = max(0, int(mts))
+                except ValueError:
+                    mt = None
+            else:
+                mt = None
             comps.append({"name": name or "同伴", "dest": dest,
-                          "split_at": splits, "tickets": tkts,
+                          "split_at": split_codes(vs[2].get()),
+                          "tickets": tkts, "max_transfers": mt,
                           "final_by": vs[4].get().strip() or None})
         cfg["companions"] = comps
         cfg.pop("companion", None)             # 统一到 companions，去掉旧的单人字段
@@ -744,7 +763,7 @@ class App:
             if tm.COMPANIONS:
                 pairs = tm.pair_companions(plans)
                 okp = [x for x in pairs if x["hit"]]
-                print("可同行方案 %d 个，其中两边都满足各自到达底线 %d 个\n"
+                print("可同行方案 %d 个，其中各人都满足自己那条底线 %d 个\n"
                       % (len(pairs), len(okp)))
                 for x in pairs[:20]:
                     print(("  ★ " if x["hit"] else "  ○ ") + tm.pair_text(x) + "\n")
