@@ -91,6 +91,10 @@ MID1 = ["ZZF", "ZAF", "ZIF"]             # 层1：一次换乘站
 VIA = ["JOF"]                            # 层2：二次换乘站（可多个）
 VIA2 = []                                # 层3：三次换乘站（留空=最多两次换乘）
 DEST = "JIF"                             # 终点：焦作西
+# 同行人模式：两人坐同一趟车到 split_at，下车后各走各的。
+# monitor_config.json 里写 "companion": {"dest":"LYF","split_at":"ZAF","tickets":2}
+# 不配这个字段 = 完全不启用，行为和以前一模一样。
+COMPANION = {}
 MAX_TRANSFERS = 3                        # 结果里最多展示几次换乘（<=2 可提速）
 
 # 扫描用路线集合，由 rebuild_legs() 自动生成（兼容旧名的三段拆分）
@@ -155,8 +159,18 @@ SCAN_MODE = "fast"
 FAST_MID = ["ZZF", "ZAF"]
 
 
+def _dests():
+    """终点集合：主终点 + 同行人的终点（没配同行人就只有一个）"""
+    out = []
+    for c in (str(DEST).strip().upper(),
+              str((COMPANION or {}).get("dest", "")).strip().upper()):
+        if c and c not in out:
+            out.append(c)
+    return out or [str(DEST).strip().upper()]
+
+
 def _layers():
-    """按层号从低到高返回换乘网络，最后一层固定是终点站。
+    """按层号从低到高返回换乘网络，最后一层固定是终点站（可能不止一个）。
 
     空层会被丢掉（比如不配 VIA2 就没有第三次换乘），
     剩下的层数直接决定「最多几次换乘」。
@@ -172,14 +186,14 @@ def _layers():
                 clean.append(n)
         if clean:
             layers.append(clean)
-    dest = str(DEST).strip().upper()
-    layers.append([dest])
+    dests = _dests()
+    layers.append(list(dests))
     # 去重：中途出现的终点站会被后面的直连绕开，先剔除以免绕圈
     for lay in layers[:-1]:
         for i in range(len(lay) - 1, -1, -1):
-            if lay[i] == dest:
+            if lay[i] in dests:
                 del lay[i]
-    return [lay for lay in layers if lay] or [[dest]]
+    return [lay for lay in layers if lay] or [list(dests)]
 
 
 def max_segs():
@@ -224,7 +238,7 @@ def load_config():
     """
     global DATES, DATE_PREF, ORIGINS, MID1, VIA, VIA2, DEST
     global EXTRA_WATCH, ONLY_SEATED, SCAN_MODE, FAST_MID
-    global MAX_TRANSFERS, CITI_STATIONS
+    global MAX_TRANSFERS, CITI_STATIONS, COMPANION
 
     if not os.path.exists(CONFIG_FILE):
         return False
@@ -248,6 +262,21 @@ def load_config():
         MID1 = [str(x) for x in cfg["transfer_cities"]]
     if cfg.get("dest"):
         DEST = str(cfg["dest"])
+    # 同行人：两人共乘到 split_at 分手，之后各走各的。没配就是单人模式
+    comp = cfg.get("companion")
+    COMPANION = {}
+    # 注意 dest 写成 null 或留空都要当成「不启用」，不能转成字符串 "NONE"
+    raw_dest = comp.get("dest") if isinstance(comp, dict) else None
+    if raw_dest and str(raw_dest).strip():
+        COMPANION = {
+            "dest": str(comp["dest"]).strip().upper(),
+            "split_at": str(comp.get("split_at", "")).strip().upper(),
+            "name": str(comp.get("name", "同伴")).strip() or "同伴",
+            "tickets": int(comp.get("tickets", 2) or 2),
+            "final_by": (str(comp["final_by"]).strip()
+                         if comp.get("final_by") else ""),
+        }
+
     def as_list(v):
         """配置里既可以写单个字符串 'JOF'，也可以写列表 ['JOF','XXF']"""
         if not v:
@@ -294,7 +323,12 @@ def load_config():
 
     rebuild_legs()
     log("已载入配置  日期=%s  出发=%s  终点=%s  模式=%s  只看有座=%s"
-        % (",".join(DATES), "/".join(ORIGINS), sname(DEST), SCAN_MODE, ONLY_SEATED))
+        % (",".join(DATES), "/".join(ORIGINS),
+           "/".join(sname(x) for x in _dests()), SCAN_MODE, ONLY_SEATED))
+    if COMPANION:
+        log("同行人模式  %s 去 %s，两人在 %s 分手，共同段需 ≥%d 张票"
+            % (COMPANION["name"], sname(COMPANION["dest"]),
+               sname(COMPANION["split_at"]), COMPANION["tickets"]))
     log("换乘网络  %s → %s   最多 %d 次换乘，需扫描 %d 条区间"
         % (" → ".join("/".join(x) for x in _layers()),
            sname(DEST), max_segs() - 1, len(ROUTES)))
@@ -443,6 +477,11 @@ def mk_plan(date, pref, legs):
 
     final = legs[-1]["arrive"]
     first = legs[0]
+    pref = dict(pref or {})
+    # 同行人的终点可以单独设到达底线，没设就和主终点共用一套
+    if (COMPANION and COMPANION.get("final_by")
+            and legs[-1]["to_code"] == COMPANION["dest"]):
+        pref["final_by"] = COMPANION["final_by"]
 
     hit = bool(pref) and (pref["dep_from"] <= first["start"] <= pref["dep_to"])
     if hit and pref.get("arr_zz_by") and first["to_code"] in ZZ_GROUP:
@@ -483,6 +522,7 @@ def build_plans(rows, dates):
     layers = _layers()
     nlayer = len(layers)
     seg_cap = max_segs()
+    dests = set(_dests())
 
     for d in dates:
         pref = DATE_PREF.get(d, {})
@@ -518,7 +558,7 @@ def build_plans(rows, dates):
 
         def walk(li, node, legs):
             """当前停在 layer[li] 的 node 站，legs 是已走路径"""
-            if node == DEST:
+            if node in dests:
                 add(legs)
                 return
             if len(legs) >= seg_cap:
@@ -544,6 +584,91 @@ def plan_key(p):
     return "%s|%s" % (p["date"], "-".join(l["code"] for l in p["legs"]))
 
 
+def enough_for(seats, n):
+    """这一趟车能不能一次买到 n 张（同一席位等级，保证两人坐一起）"""
+    vals = [seat_value(v) for v in (seats or {}).values()]
+    return max(vals or [0]) >= n
+
+
+def shared_legs(p, split_at):
+    """方案里两人「一起坐」的那几段：从第一段到第一次抵达分手站为止。
+
+    压根不经过分手站就返回 None，说明这条路线没法跟对方同行。
+    """
+    for i, l in enumerate(p["legs"]):
+        if l["to_code"] == split_at:
+            return p["legs"][:i + 1]
+    return None
+
+
+def pair_companions(plans):
+    """把「我」和「同伴」的方案按共用段配成同行方案。
+
+    严格规则：共用段的车次与区间必须逐段一致（即同一趟车、同一区间），
+    并且共用段每一段的余票都要够两个人，否则不算真的能同行。
+    """
+    if not COMPANION or not COMPANION.get("split_at"):
+        return []
+    mine_dest = str(DEST).strip().upper()
+    fr_dest = COMPANION["dest"]
+    need = max(1, int(COMPANION.get("tickets", 2) or 2))
+
+    buckets = {}
+    for p in plans:
+        dest = p["legs"][-1]["to_code"]
+        if dest not in (mine_dest, fr_dest):
+            continue
+        shared = shared_legs(p, COMPANION["split_at"])
+        if not shared:
+            continue
+        key = (p["date"], tuple((l["code"], l["from_code"], l["to_code"])
+                                for l in shared))
+        b = buckets.setdefault(key, {})
+        b["mine" if dest == mine_dest else "friend"] = p
+
+    out = []
+    for (_date, _k), b in buckets.items():
+        mine, fri = b.get("mine"), b.get("friend")
+        if not mine or not fri:
+            continue                       # 只有一个人走通，不算同行方案
+        shared = shared_legs(mine, COMPANION["split_at"])
+        ok = all(enough_for(l["seats"], need) for l in shared)
+        out.append({
+            "date": mine["date"], "shared": shared, "need": need,
+            "mine": mine, "friend": fri, "tickets_ok": ok,
+            "hit": bool(mine["hit"] and fri["hit"] and ok),
+            "final": max(mine["final"], fri["final"]),
+        })
+    out.sort(key=lambda x: (not x["hit"], x["date"], x["final"]))
+    return out
+
+
+def pair_key(x):
+    return "PAIR|%s|%s|%s" % (x["date"], plan_key(x["mine"]),
+                              plan_key(x["friend"]))
+
+
+def pair_text(x):
+    def seg(ls):
+        return " ＋ ".join("%s %s→%s %s" % (
+            l["code"], l["from"], l["to"], ts(l["start"], l["arrive"]))
+            for l in ls)
+
+    n = len(x["shared"])
+
+    def tail(p):
+        """分手之后各自怎么走；分手站就是终点的话直接下车"""
+        rest = p["legs"][n:]
+        if not rest:
+            return "在%s下车" % p["legs"][-1]["to"]
+        return "%s 到%s" % (seg(rest), p["legs"][-1]["to"])
+
+    warn = "" if x["tickets_ok"] else "（共同段余票不足%d张，坐不到一起）" % x["need"]
+    return "[同行] %s 一起坐 %s 到%s；之后你 %s，%s %s，最晚 %s 各自到达%s" % (
+        x["date"], seg(x["shared"]), x["shared"][-1]["to"],
+        tail(x["mine"]), COMPANION["name"], tail(x["friend"]), x["final"], warn)
+
+
 def plan_text(p):
     segs = " ＋ ".join(
         "%s %s→%s %s" % (l["code"], l["from"], l["to"], ts(l["start"], l["arrive"]))
@@ -554,7 +679,8 @@ def plan_text(p):
         buf = "无需换乘"
     risk = "　⚠偏紧" if p["tight"] else ""
     return "%s%s %s（%s，%s到%s%s）" % (
-        p["seat_tag"], p["date"], segs, buf, p["final"], sname(DEST), risk)
+        p["seat_tag"], p["date"], segs, buf, p["final"],
+        sname(p["legs"][-1]["to_code"]), risk)
 
 
 def fmt(k, v):
@@ -604,6 +730,13 @@ def main():
         log("可衔接完整方案 %d 个，其中命中偏好 %d 个" % (len(plans), len(hit_plans)))
         for p in plans[:10]:
             log("  [%s] %s" % ("命中" if p["hit"] else "备选", plan_text(p)))
+        if COMPANION:
+            pairs_all = pair_companions(plans)
+            log("可同行方案 %d 个，其中命中偏好 %d 个"
+                % (len(pairs_all), len([x for x in pairs_all if x["hit"]])))
+            for x in pairs_all[:10]:
+                log("  [%s] %s" % ("同行" if x["hit"] else "备选",
+                                   pair_text(x)))
         return 0
 
     prev = {}
@@ -626,9 +759,21 @@ def main():
 
     # 新出现的「命中偏好的完整方案」
     prev_hit = set((prev.get("_hit_plans") or []))
-    new_hit = [p for p in hit_plans if plan_key(p) not in prev_hit]
+    pairs = pair_companions(plans)
+    hit_pairs = [x for x in pairs if x["hit"]]
+    prev_hit_pairs = set(prev.get("_hit_pairs") or [])
+    new_pairs = [x for x in hit_pairs if pair_key(x) not in prev_hit_pairs]
 
-    snap = {"_hit_plans": [plan_key(p) for p in hit_plans]}
+    # 已经配成同行方案的就不再单推「我」那一条，免得同一趟车提醒两次
+    paired_keys = set()
+    for x in hit_pairs:
+        paired_keys.add(plan_key(x["mine"]))
+        paired_keys.add(plan_key(x["friend"]))
+    new_hit = [p for p in hit_plans
+               if plan_key(p) not in prev_hit and plan_key(p) not in paired_keys]
+
+    snap = {"_hit_plans": [plan_key(p) for p in hit_plans],
+            "_hit_pairs": [pair_key(x) for x in hit_pairs]}
     for k, v in rows.items():
         snap["%s|%s|%s|%s" % k] = {"total": v["total"], "seats": v["seats"]}
     try:
@@ -645,52 +790,89 @@ def main():
         log("无变化。已扫 %d 趟车，有票 %d 趟，符合偏好首段 %d 趟，命中方案 %d 个"
             % (len(rows), len(available), len(preferred), len(hit_plans)))
 
+    if new_pairs:
+        log("*** 出现 %d 个可与%s同行的方案 ***" % (len(new_pairs), COMPANION["name"]))
+        for x in new_pairs:
+            log("  *** " + pair_text(x))
     if new_hit:
-        log("*** 出现 %d 个命中偏好的完整方案 ***" % len(new_hit))
+        log("*** 出现 %d 个命中偏好的完整方案（仅你一人可走）***" % len(new_hit))
         for p in new_hit:
             log("  *** " + plan_text(p))
-        if not args.nopush:
-            # 只推最靠前的 2 条：极简推送走 GET，内容必须短
-            top = new_hit[:2]
-            extra = ("（另有 %d 个方案）" % (len(new_hit) - len(top))
-                     if len(new_hit) > len(top) else "")
-            body = "".join(
+
+    if (new_pairs or new_hit) and not args.nopush:
+        # 只推最靠前的几条：极简推送走 GET，内容必须短
+        top_pairs, top_solo = new_pairs[:2], new_hit[:2]
+        rest = (len(new_pairs) - len(top_pairs)) + (len(new_hit) - len(top_solo))
+        extra = "（另有 %d 个方案）" % rest if rest > 0 else ""
+
+        def legs_html(ls, start=1):
+            return "<br>".join(
+                "第%d段 %s：%s→%s　%s　二等 %s / 无座 %s" % (
+                    start + i, l["code"], l["from"], l["to"],
+                    ts_html(l["start"], l["arrive"]),
+                    l["seats"].get("二等座") or "-",
+                    l["seats"].get("无座") or "-")
+                for i, l in enumerate(ls)) or "无需再换乘"
+
+        def seg_short(ls):
+            return " + ".join("%s %s%s→%s%s" % (
+                l["code"], l["from"], l["start"], l["to"], l["arrive"])
+                for l in ls)
+
+        body = ""
+        for x in top_pairs:
+            n = len(x["shared"])
+            body += ("<p><b>[可与%s同行] %s 出发</b><br>共同乘坐：%s<br>"
+                     "你接续：%s<br>%s接续：%s<br>预计 <b>%s</b> 前各自到达%s</p>") % (
+                COMPANION["name"], x["date"][5:], legs_html(x["shared"]),
+                legs_html(x["mine"]["legs"][n:], n + 1), COMPANION["name"],
+                legs_html(x["friend"]["legs"][n:], n + 1), x["final"],
+                "" if x["tickets_ok"] else "　⚠共同段余票不足%d张" % x["need"])
+        for p in top_solo:
+            body += (
                 "<p><b>%s 出发　%s</b>（你要的窗口 %s-%s）<br>%s<br>"
                 "换乘间隔 %s<br>预计 <b>%s</b> 到%s</p>" % (
                     p["date"][5:], p["seat_tag"],
                     DATE_PREF.get(p["date"], {}).get("dep_from", ""),
                     DATE_PREF.get(p["date"], {}).get("dep_to", ""),
-                    "<br>".join(
-                        "第%d段 %s：%s→%s　%s　二等 %s / 无座 %s" % (
-                            i + 1, l["code"], l["from"], l["to"],
-                            ts_html(l["start"], l["arrive"]),
-                            l["seats"].get("二等座") or "-",
-                            l["seats"].get("无座") or "-")
-                        for i, l in enumerate(p["legs"])),
+                    legs_html(p["legs"]),
                     "、".join(["%d分(建议≥%d)" % (g, n)
                                for g, n in zip(p["buffers"], p["needs"])]) or "无需换乘",
-                    p["final"], sname(DEST))
-                for p in top) + ("<p>%s</p>" % extra if extra else "")
-            any_seat = any(has_seat(l["seats"]) for p in new_hit for l in p["legs"])
-            title = "12306 有票了！马上下单" + ("（有座）" if any_seat else "（仅无座）")
+                    p["final"], sname(p["legs"][-1]["to_code"])))
+        if extra:
+            body += "<p>%s</p>" % extra
 
-            # 极简推送走 GET，URL 有硬长度限制，单独给一份精简文本
-            def short_of(p):
-                segs = " + ".join(
-                    "%s %s%s→%s%s" % (l["code"], l["from"], l["start"], l["to"], l["arrive"])
-                    for l in p["legs"])
-                return "%s %s %s %s到%s" % (
-                    p["date"][5:], segs, p["seat_tag"], p["final"], sname(DEST))
+        seat_src = ([l for p in new_hit for l in p["legs"]] +
+                    [l for x in new_pairs for l in x["mine"]["legs"]] +
+                    [l for x in new_pairs for l in x["friend"]["legs"]])
+        any_seat = any(has_seat(l["seats"]) for l in seat_src)
+        title = "12306 有票了！马上下单"
+        if new_pairs:
+            title += "（可与%s同行）" % COMPANION["name"]
+        title += "（有座）" if any_seat else "（仅无座）"
 
-            short = "【12306放票】" + short_of(top[0])
-            if len(top) > 1:
-                short += "\n备选：" + short_of(top[1])
-            if extra:
-                short += "\n" + extra.strip("（）")
-            short += "\n马上去12306下单！"
+        # 极简推送走 GET，URL 有硬长度限制，单独给一份精简文本
+        blocks = []
+        for x in top_pairs:
+            n = len(x["shared"])
+            blocks.append("%s 同行 %s｜你 %s｜%s %s" % (
+                x["date"][5:], seg_short(x["shared"]),
+                seg_short(x["mine"]["legs"][n:]) or "已到",
+                COMPANION["name"], seg_short(x["friend"]["legs"][n:]) or "已到"))
+        for p in top_solo:
+            blocks.append("%s %s %s %s到%s" % (
+                p["date"][5:], seg_short(p["legs"]), p["seat_tag"],
+                p["final"], sname(p["legs"][-1]["to_code"])))
 
-            ok, msg = push.send(title, body, short=short)
-            log("微信推送: %s" % msg)
+        short = "【12306放票】" + blocks[0]
+        for b in blocks[1:]:
+            short += "\n备选：" + b
+        if extra:
+            short += "\n" + extra.strip("（）")
+        short += "\n马上去12306下单！"
+
+        ok, msg = push.send(title, body, short=short)
+        log("微信推送: %s" % msg)
     return 0
 
 
