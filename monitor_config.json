@@ -27,6 +27,15 @@
     "PEN"
   ],
   "dest": "JIF",
+  "companion": {
+    "_说明": "同行人：两人坐同一趟车到 split_at 分手，之后各走各的。删掉这整段就回到单人模式。",
+    "name": "朋友",
+    "dest": null,
+    "split_at": "ZZF",
+    "tickets": 2,
+    "final_by": null
+  },
+  "_companion字段说明": "name=称呼；dest=朋友的终点电报码；split_at=分手站；tickets=共同段至少要几张票（两人填2）；final_by=朋友的到达底线，填null就跟用同一套",
   "transfer_cities": [
     "ZZF",
     "ZAF",
