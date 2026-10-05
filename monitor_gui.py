@@ -295,6 +295,11 @@ def split_codes(s):
     return [x.strip().upper() for x in (s or "").replace("，", ",").split(",") if x.strip()]
 
 
+# 时间下拉的可选项：留空=不限，其余半小时一档（Combobox 同时允许手输任意时间）
+TIME_CHOICES = [""] + ["%02d:%02d" % (h, m)
+                       for h in range(5, 24) for m in (0, 30)] + ["23:59"]
+
+
 def station_map():
     """内置站名表 + monitor_config.json 里的全量电报码（3404 个站）"""
     st = dict(getattr(tm, "STATION_NAME", {}) or {})
@@ -346,7 +351,7 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("12306 余票监控 · 配置工具")
-        root.geometry("940x760")
+        root.geometry("960x920")
 
         cfg = load_cfg()
         cred = load_cred()
@@ -421,6 +426,29 @@ class App:
         ttk.Button(btns, text="+ 加一天", command=lambda: self.add_row("", {})).pack(side="left")
         ttk.Button(btns, text="− 删最后一行", command=self.del_row).pack(side="left", padx=6)
         ttk.Label(btns, text="日期必须和上面窗口成对出现；只填日期不加窗口 → 那天不会推送",
+                  foreground="#a00").pack(side="left", padx=12)
+
+        # ---------- 同行人 ----------
+        cbox = ttk.LabelFrame(root, text=" 同行人（先一起坐，到分手站再分开；不加就是单人出行）")
+        cbox.pack(fill="x", padx=10, pady=6)
+        chead = ["称呼", "他的终点", "分手站", "共同段要几张票", "他最晚到达"]
+        for i, h in enumerate(chead):
+            ttk.Label(cbox, text=h, foreground="#555").grid(row=0, column=i, padx=6, pady=(6, 2))
+        self.crows = []
+        self.cbody = ttk.Frame(cbox)
+        self.cbody.grid(row=1, column=0, columnspan=5, sticky="w")
+        comps = cfg.get("companions")
+        if comps is None and isinstance(cfg.get("companion"), dict):
+            comps = [cfg["companion"]]          # 兼容旧的单人写法
+        for c in (comps or []):
+            if isinstance(c, dict):
+                self.add_comp(c)
+        cbtns = ttk.Frame(cbox)
+        cbtns.grid(row=2, column=0, columnspan=5, sticky="w", padx=6, pady=6)
+        ttk.Button(cbtns, text="+ 添加朋友", command=lambda: self.add_comp({})).pack(side="left")
+        ttk.Button(cbtns, text="− 删最后一行", command=self.del_comp).pack(side="left", padx=6)
+        ttk.Label(cbtns, text="终点和分手站填电报码（用上面的查询框查）；"
+                             "「最晚到达」留空 = 跟主终点用同一个底线",
                   foreground="#a00").pack(side="left", padx=12)
 
         # ---------- 查车站代码 ----------
@@ -535,12 +563,17 @@ class App:
 
     # ---- 表格 ----
     def add_row(self, date, p):
+        """日期窗口一行；「最晚到终点」用下拉，既能选也能手输"""
         r = len(self.rows)
         vs = [tk.StringVar(value=date)]
         for k in ("dep_from", "dep_to", "arr_zz_by", "final_by"):
             vs.append(tk.StringVar(value=(p.get(k) or "")))
-        for c, v in enumerate(vs):
+        for c, v in enumerate(vs[:4]):
             ttk.Entry(self.dbody, textvariable=v, width=13).grid(row=r, column=c, padx=6, pady=2)
+        cb = ttk.Combobox(self.dbody, textvariable=vs[4], values=TIME_CHOICES, width=11)
+        cb.grid(row=r, column=4, padx=6, pady=2)
+        cb.bind("<Enter>", lambda ev: self.hint(
+            "到达终点的最晚时间，超过就不推给你。可直接选，也可手填（如 16:30）；留空=不限"))
         self.rows.append(vs)
 
     def del_row(self):
@@ -550,6 +583,44 @@ class App:
         for v in vs:
             pass
         for w in self.dbody.grid_slaves(row=len(self.rows)):
+            w.destroy()
+
+    # ---- 同行人 ----
+    def add_comp(self, c):
+        """一个同行人一行：称呼 / 他的终点 / 分手站 / 票数 / 他的最晚到达"""
+        r = len(self.crows)
+        splits = c.get("split_at")
+        if isinstance(splits, (list, tuple)):
+            splits = ",".join(str(x) for x in splits)
+        vs = [tk.StringVar(value=str(c.get("name") or "")),
+              tk.StringVar(value=str(c.get("dest") or "").upper()),
+              tk.StringVar(value=str(splits or "")),
+              tk.StringVar(value=str(c.get("tickets") or 2)),
+              tk.StringVar(value=str(c.get("final_by") or ""))]
+        for i, (w, tip) in enumerate([
+                (10, "随便起个名字，推送里会显示「可与XX同行」"),
+                (10, "他最终要到的站。用上面的查询框查电报码，如 洛阳龙门=LLF"),
+                (16, "两人在哪个站分开，可填多个用逗号隔开，如 ZZF,ZAF（哪个都算）"),
+        ]):
+            e = ttk.Entry(self.cbody, textvariable=vs[i], width=w)
+            e.grid(row=r, column=i, padx=6, pady=2)
+            e.bind("<Enter>", lambda ev, t=tip: self.hint(t))
+        cb = ttk.Combobox(self.cbody, textvariable=vs[3],
+                          values=["2", "3", "4", "5", "6"], width=4)
+        cb.grid(row=r, column=3, padx=6, pady=2)
+        cb.bind("<Enter>", lambda ev: self.hint(
+            "共同乘坐那几段要一次买到几张（含你自己）。同一席位等级够这个数才算真能坐一起"))
+        fb = ttk.Combobox(self.cbody, textvariable=vs[4], values=TIME_CHOICES, width=9)
+        fb.grid(row=r, column=4, padx=6, pady=2)
+        fb.bind("<Enter>", lambda ev: self.hint(
+            "他到目的地的最晚时间，可以跟你的不一样。留空 = 跟上面主终点的底线相同"))
+        self.crows.append(vs)
+
+    def del_comp(self):
+        if not self.crows:
+            return
+        self.crows.pop()
+        for w in self.cbody.grid_slaves(row=len(self.crows)):
             w.destroy()
 
     def hint(self, t):
@@ -590,6 +661,29 @@ class App:
         cfg["fast_mid"] = split_codes(self.v_fastmid.get())
         cfg["scan_mode"] = self.v_mode.get()
         cfg["only_seated"] = self.v_seated.get()
+        # 同行人：可以加任意多个，每个人的终点和最晚到达都能不一样
+        comps = []
+        for vs in self.crows:
+            name = vs[0].get().strip()
+            dest = vs[1].get().strip().upper()
+            if not name and not dest:
+                continue                       # 整行空着就当没加
+            if not dest:
+                raise ValueError("同行人「%s」没填终点站" % (name or "未命名"))
+            splits = split_codes(vs[2].get())
+            if not splits:
+                raise ValueError("同行人「%s」没填分手站（在哪个站分开）" % name)
+            if dest == cfg["dest"]:
+                raise ValueError("同行人「%s」的终点和你的终点一样，不用单独加" % name)
+            try:
+                tkts = max(1, int(str(vs[3].get()).strip() or 2))
+            except ValueError:
+                tkts = 2
+            comps.append({"name": name or "同伴", "dest": dest,
+                          "split_at": splits, "tickets": tkts,
+                          "final_by": vs[4].get().strip() or None})
+        cfg["companions"] = comps
+        cfg.pop("companion", None)             # 统一到 companions，去掉旧的单人字段
         return cfg
 
     # ---- 动作 ----
@@ -625,15 +719,27 @@ class App:
             hits = [p for p in plans if p["hit"]]
             if tm.ONLY_SEATED:
                 hits = [p for p in hits if all(tm.has_seat(l["seats"]) for l in p["legs"])]
-            hits.sort(key=lambda p: p["final"])
-            print("扫到 %d 趟车，有票 %d 趟，可行方案 %d 个，命中你的窗口 %d 个\n"
-                  % (len(rows), len(avail), len(plans), len(hits)))
-            if not hits:
+            mine_dest = str(tm.DEST).strip().upper()
+            # 终点是同行人的方案只是给他配对的，不算「我自己能走」，单独展示
+            mine = [p for p in hits if p["legs"][-1]["to_code"] == mine_dest]
+            mine.sort(key=lambda p: p["final"])
+            print("扫到 %d 趟车，有票 %d 趟，可行方案 %d 个，命中你窗口的方案 %d 个\n"
+                  % (len(rows), len(avail), len(plans), len(mine)))
+            if not mine:
                 print("当前没有符合窗口的方案。云端会继续盯，一有票就推微信。\n")
-            for p in hits[:20]:
+            for p in mine[:20]:
                 print("  ★ " + tm.plan_text(p) + "\n")
-            if len(hits) > 20:
-                print("  …另有 %d 个，已省略\n" % (len(hits) - 20))
+            if len(mine) > 20:
+                print("  …另有 %d 个，已省略\n" % (len(mine) - 20))
+            if tm.COMPANIONS:
+                pairs = tm.pair_companions(plans)
+                okp = [x for x in pairs if x["hit"]]
+                print("可同行方案 %d 个，其中两边都满足各自到达底线 %d 个\n"
+                      % (len(pairs), len(okp)))
+                for x in pairs[:20]:
+                    print(("  ★ " if x["hit"] else "  ○ ") + tm.pair_text(x) + "\n")
+                if len(pairs) > 20:
+                    print("  …另有 %d 个，已省略\n" % (len(pairs) - 20))
         except Exception as e:
             import traceback
             print("扫描失败：%s\n%s\n" % (e, traceback.format_exc()))
