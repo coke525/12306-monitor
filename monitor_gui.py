@@ -8,6 +8,8 @@
     [立即扫描]        本地跑一轮，结果直接显示在下方（不推送）
     [测试微信推送]     发一条测试消息，确认链路通
     [同步到 GitHub]    把配置推到云端仓库，定时任务下一轮自动生效（关机也跑）
+    [关闭云端监控]     停用云端定时任务，不再扫描、不再推微信（配置全保留）
+    [恢复云端监控]     把定时任务装回仓库，继续监控
 """
 
 import base64
@@ -37,6 +39,83 @@ CRED_FILE = os.path.join(BASE, "push_config.json")
 CTX = ssl.create_default_context()
 CTX.check_hostname = False
 CTX.verify_mode = ssl.CERT_NONE
+
+# 云端定时任务的原始内容，内嵌在 exe 里。
+# 这样「恢复监控」不依赖本地有没有 .github/workflows/ticket.yml，
+# exe 被拷到任何目录都能把定时任务原样装回仓库。
+WF_PATH = ".github/workflows/ticket.yml"
+WF_TEMPLATE = """name: 12306 余票监控
+
+on:
+  schedule:
+    # cron 用 UTC，北京时间 = UTC+8。下面两条覆盖 北京 07:00-23:55
+    - cron: "*/5 23 * * *"      # 北京 07:00-07:55
+    - cron: "*/5 0-15 * * *"    # 北京 08:00-23:55
+    # 备用触发点（整点/半点），防止 */5 被 GitHub 丢调度
+    - cron: "3,33 0-15 * * *"
+    - cron: "7,37 23 * * *"
+  workflow_dispatch:            # 手动点一下立刻跑
+
+# 同一时刻只允许一个监控任务，避免重复推送和提交冲突
+concurrency:
+  group: ticket-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write           # 需要把状态快照提交回仓库
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # GitHub 的定时调度经常丢，所以不依赖它：单次任务内部连续扫描 27 分钟，
+      # 每轮约 62 秒 + 间隔 15 秒 —— 只要一天触发几次就能近乎连续覆盖
+      - name: 连续扫描（最多 27 分钟）
+        continue-on-error: true
+        env:
+          WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          WXPUSHER_TOKEN: ${{ secrets.WXPUSHER_TOKEN }}
+          WXPUSHER_UID: ${{ secrets.WXPUSHER_UID }}
+          STATE_FILE: cloud_state.json
+          SCAN_SECONDS: "1620"
+        run: |
+          START=$(date +%s)
+          i=0
+          while true; do
+            NOW=$(date +%s)
+            ELAPSED=$((NOW - START))
+            if [ "$ELAPSED" -ge "$SCAN_SECONDS" ]; then
+              echo "已跑满 ${SCAN_SECONDS}s，结束（共 $i 轮）"
+              break
+            fi
+            i=$((i + 1))
+            echo "=== 第 $i 轮  已用 ${ELAPSED}s  $(date -u +'%H:%M:%S') UTC ==="
+            python cloud_monitor.py
+            sleep 15
+          done
+
+      - name: 回写状态快照
+        run: |
+          git config user.name "ticket-bot"
+          git config user.email "ticket-bot@users.noreply.github.com"
+          git add -f cloud_state.json
+          if git diff --cached --quiet; then
+            echo "状态无变化，不提交"
+          else
+            git commit -m "state: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            git pull --rebase origin "${GITHUB_REF_NAME}" || true
+            git push || echo "push 冲突/失败，下次运行会覆盖，忽略"
+          fi
+"""
 
 
 # ---------------------------------------------------------------- IO 辅助
@@ -243,13 +322,26 @@ class App:
 
         # ---------- 按钮 ----------
         bbox = ttk.Frame(root)
-        bbox.pack(fill="x", padx=10, pady=8)
+        bbox.pack(fill="x", padx=10, pady=(8, 2))
         self.busy = False
         for text, cmd in [("保存配置", self.on_save),
                           ("立即扫描（不推送）", self.on_scan),
                           ("测试微信推送", self.on_test),
                           ("同步到 GitHub（云端生效）", self.on_sync)]:
             ttk.Button(bbox, text=text, command=cmd).pack(side="left", padx=4)
+
+        bbox2 = ttk.Frame(root)
+        bbox2.pack(fill="x", padx=10, pady=(0, 8))
+        for text, cmd, tip in [
+                ("关闭云端监控", self.on_stop,
+                 "停用云端定时任务：不再扫描、不再推微信。配置和仓库文件全部保留"),
+                ("恢复云端监控", self.on_resume,
+                 "把定时任务装回仓库，继续扫描并推微信"),
+                ("查看云端状态", self.on_status,
+                 "看云端监控当前是开着还是关着，以及最近一次运行时间")]:
+            b = ttk.Button(bbox2, text=text, command=cmd)
+            b.pack(side="left", padx=4)
+            b.bind("<Enter>", lambda ev, t=tip: self.hint(t))
 
         # ---------- 输出 ----------
         self.hint_var = tk.StringVar(value="鼠标移到输入框上看说明")
@@ -427,6 +519,113 @@ class App:
             new, err2 = gh("PUT", path, pat, payload)
             print("[同步] %s\n" % ("已推送到云端，下一轮扫描自动生效"
                                    if not err2 else "失败：" + err2))
+        finally:
+            self.busy = False
+
+
+    # ---- 云端监控开关 ----
+
+    def _cred(self):
+        """取出 PAT 和仓库名，缺一样就弹提示并返回 (None, None)"""
+        pat = self.v_pat.get().strip()
+        repo = self.v_repo.get().strip()
+        if not pat or "/" not in repo:
+            messagebox.showerror("缺配置",
+                                 "需要 GitHub PAT（ghp_ 开头）和仓库名（用户名/仓库名）。\n\n"
+                                 "这两项填好并点过「保存配置」后就存在本机，不用每次重填。")
+            return None, None
+        return pat, repo
+
+    @staticmethod
+    def _wf_path(repo):
+        return "/repos/%s/contents/%s" % (repo, urllib.parse.quote(WF_PATH))
+
+    def on_status(self):
+        pat, repo = self._cred()
+        if not pat:
+            return
+        self.busy = True
+        threading.Thread(target=self._status, args=(pat, repo), daemon=True).start()
+
+    def _status(self, pat, repo):
+        try:
+            cur, err = gh("GET", self._wf_path(repo) + "?ref=main", pat)
+            if err and "404" not in str(err):
+                print("[云端] 查询失败：%s\n" % err)
+                return
+            exists = (not err) and isinstance(cur, dict) and cur.get("sha")
+            if exists:
+                print("[云端] 状态：开启中（仓库里有定时任务，正在扫描）")
+                runs, e2 = gh("GET", "/repos/%s/actions/runs?per_page=1" % repo, pat)
+                if not e2 and runs.get("workflow_runs"):
+                    x = runs["workflow_runs"][0]
+                    print("        最近一次运行：%s  %s\n"
+                          % (x["created_at"], x["status"]))
+            else:
+                print("[云端] 状态：已关闭（仓库里没有定时任务，不会扫描也不会推送）\n")
+        finally:
+            self.busy = False
+
+    def on_stop(self):
+        pat, repo = self._cred()
+        if not pat:
+            return
+        if not messagebox.askyesno(
+                "确认关闭云端监控",
+                "关闭后：\n"
+                "  · 云端不再扫描余票\n"
+                "  · 微信不再收到推送\n"
+                "  · 配置和仓库文件全部保留，随时可恢复\n\n"
+                "另外：本地那个「云端监控心跳」定时任务不归本工具管，\n"
+                "需要在 WorkBuddy 的定时任务界面里单独暂停。\n\n"
+                "确定关闭吗？"):
+            return
+        self.busy = True
+        threading.Thread(target=self._stop, args=(pat, repo), daemon=True).start()
+
+    def _stop(self, pat, repo):
+        try:
+            path = self._wf_path(repo)
+            cur, err = gh("GET", path + "?ref=main", pat)
+            if err or not (isinstance(cur, dict) and cur.get("sha")):
+                print("[云端] 本来就是关闭状态，无需操作\n")
+                return
+            _, e = gh("DELETE", path, pat,
+                      {"message": "stop monitoring", "sha": cur["sha"],
+                       "branch": "main"})
+            if e:
+                print("[云端] 关闭失败：%s\n" % e)
+            else:
+                print("[云端] 已关闭：不再扫描、不再推微信。\n"
+                      "       想恢复时点「恢复云端监控」即可。\n"
+                      "       本地的「云端监控心跳」定时任务需另行暂停。\n")
+        finally:
+            self.busy = False
+
+    def on_resume(self):
+        pat, repo = self._cred()
+        if not pat:
+            return
+        self.busy = True
+        threading.Thread(target=self._resume, args=(pat, repo), daemon=True).start()
+
+    def _resume(self, pat, repo):
+        try:
+            path = self._wf_path(repo)
+            cur, err = gh("GET", path + "?ref=main", pat)
+            if not err and isinstance(cur, dict) and cur.get("sha"):
+                print("[云端] 本来就是开启状态，无需操作\n")
+                return
+            payload = {"message": "resume monitoring",
+                       "content": base64.b64encode(
+                           WF_TEMPLATE.encode("utf-8")).decode("ascii"),
+                       "branch": "main"}
+            _, e = gh("PUT", path, pat, payload)
+            if e:
+                print("[云端] 恢复失败：%s\n" % e)
+            else:
+                print("[云端] 已恢复：定时任务装回仓库，继续扫描并推微信。\n"
+                      "       想立刻跑一轮，去仓库 Actions 页面点 Run workflow。\n")
         finally:
             self.busy = False
 
