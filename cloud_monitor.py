@@ -35,7 +35,9 @@ GitHub Actions 继续用 file 模式（配合 git 提交），行为不变。
 
 import os
 import sys
+import io
 import json
+import datetime
 import urllib.parse
 import urllib.request
 
@@ -223,6 +225,65 @@ def push_state(repo_path, local_path):
         return False
 
 
+def _beijing_now():
+    """云函数跑在 UTC，北京时间要自己 +8，否则心跳会晚 8 个小时"""
+    return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+
+
+def maybe_heartbeat(local_path):
+    """每日心跳：北京时间过了设定钟点、且今天还没发过，就推一条「我还活着」。
+
+    关机后你没法确认云端还跑不跑——只有发现新票才会推微信。
+    这条让你每天固定收到一条，顺便验证推送链路没断。
+    HEARTBEAT_HOUR=0 表示关闭。返回 (标题, html正文, 短文本) 或 None。
+    """
+    try:
+        hour = int(os.environ.get("HEARTBEAT_HOUR", "8") or 0)
+    except Exception:      # noqa: BLE001
+        hour = 8
+    if hour <= 0:
+        return None
+    now = _beijing_now()
+    if now.hour < hour:
+        return None
+
+    snap = {}
+    try:
+        with io.open(local_path, encoding="utf-8") as fp:
+            snap = json.load(fp) or {}
+    except Exception:      # noqa: BLE001
+        snap = {}
+    today = now.strftime("%Y-%m-%d")
+    if snap.get("_hb_date") == today:
+        return None
+
+    snap["_hb_date"] = today
+    snap["_hb_at"] = now.strftime("%Y-%m-%d %H:%M")
+    try:
+        with io.open(local_path, "w", encoding="utf-8") as fp:
+            json.dump(snap, fp, ensure_ascii=False, indent=2)
+    except Exception:      # noqa: BLE001
+        pass
+
+    hits = len(snap.get("_hit_plans") or [])
+    pairs = len(snap.get("_hit_pairs") or [])
+    dates = list(getattr(tm, "DATES", []) or [])
+    try:
+        dest = tm.sname(str(tm.DEST).strip().upper())
+    except Exception:      # noqa: BLE001
+        dest = str(getattr(tm, "DEST", "") or "")
+    daytxt = "、".join(str(d)[5:] for d in dates) or "（没配日期）"
+    return ("12306 监控还活着（%s）" % today[5:],
+            "<br>".join([
+                "云端每分钟在跑，这条是每日报平安。",
+                "监控日期：%s" % daytxt,
+                "终点：%s" % dest,
+                "当前命中你窗口的方案 %d 个，可同行 %d 个" % (hits, pairs),
+                "出新票会另外单独推给你；没新票就不再打扰。"]),
+            "[心跳] %s 云端正常｜%s｜终点%s｜命中%d个｜同行%d个｜有票会另推"
+            % (today[5:], daytxt, dest, hits, pairs))
+
+
 def run_once():
     """跑一轮：拉状态 → 扫描对比 → 推送 → 存状态。云函数直接调这个。
     返回状态信息字典，云函数入口会把它放进返回值，方便排查。"""
@@ -254,6 +315,15 @@ def run_once():
     rc = tm.main()
 
     info["rc"] = rc
+    # 每日心跳（只有云端这条路径会发，本地 GUI 点扫描不会触发）
+    try:
+        hb = maybe_heartbeat(local_path)
+        if hb:
+            ok, msg = cloud_send(*hb)
+            info["heartbeat"] = ("ok" if ok else "FAIL: %s" % msg)[:120]
+            print("[cloud] 每日心跳：%s" % info["heartbeat"])
+    except Exception as e:      # noqa: BLE001
+        info["heartbeat"] = "ERR: %s" % str(e)[:80]
     if mode == "github" and os.path.exists(local_path):
         info["push"] = ("ok" if push_state(repo_path, local_path)
                         else ("FAIL: %s" % _STATE_ERR)[:200])

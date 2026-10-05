@@ -34,6 +34,10 @@ sys.path.insert(0, BASE)
 
 import train_monitor as tm        # noqa: E402
 import push as _push              # noqa: E402
+try:                              # 腾讯云的开关/部署都走它
+    import deploy_tencent as dt   # noqa: E402
+except Exception:                 # noqa: BLE001  缺了也不能让整个界面打不开
+    dt = None
 
 CONFIG_FILE = os.path.join(BASE, "monitor_config.json")
 CRED_FILE = os.path.join(BASE, "push_config.json")
@@ -571,28 +575,60 @@ class App:
         ttk.Label(left, text="fast≈40秒/轮　full≈90秒/轮",
                   foreground="#888").grid(row=0, column=3)
 
+        # 每日心跳：关机后只有它能让你知道云端还活着
+        self.v_hb = tk.StringVar(value=str(cfg.get("heartbeat_hour", 8)))
+        ttk.Label(left, text="每日心跳").grid(row=1, column=0, padx=(10, 3), pady=(0, 8))
+        hb = ttk.Combobox(left, textvariable=self.v_hb, width=7,
+                          values=["0", "6", "7", "8", "9", "12", "20"])
+        hb.grid(row=1, column=1, sticky="w")
+        hb.bind("<Enter>", lambda ev: self.hint(
+            "北京时间几点推一条「我还活着」。因为只有出现新票才会推微信，"
+            "不加这条你没法确认云端是不是还在跑。0 = 不推。改完要重新部署到腾讯云才生效"))
+        ttk.Label(left, text="点推一条报平安，0=不推", foreground="#888").grid(
+            row=1, column=2, sticky="w", padx=6)
+
         right = ttk.LabelFrame(obox, text=" 推送与同步凭据（只存在本机）")
         right.pack(side="left", fill="x", expand=True, padx=(10, 0))
         self.v_spt = tk.StringVar(value=cred.get("wxpusher_spt") or "")
         self.v_pat = tk.StringVar(value=cred.get("github_pat") or "")
         self.v_repo = tk.StringVar(value=cred.get("github_repo") or "coke525/12306-monitor")
-        for i, (lb, var, show) in enumerate([
-            ("微信 SPT", self.v_spt, ""),
-            ("GitHub PAT", self.v_pat, "*"),
-            ("仓库", self.v_repo, ""),
+        self.v_tsid = tk.StringVar(value=cred.get("tencent_sid") or "")
+        self.v_tskey = tk.StringVar(value=cred.get("tencent_skey") or "")
+        self.v_tregion = tk.StringVar(value=cred.get("tencent_region") or "ap-guangzhou")
+        for i, (lb, var, show, tip) in enumerate([
+            ("微信 SPT", self.v_spt, "", "WxPusher 极简推送的 token，SPT_ 开头"),
+            ("GitHub PAT", self.v_pat, "*", "同步配置和存状态用的 GitHub 令牌"),
+            ("仓库", self.v_repo, "", "状态文件存在哪个仓库，一般不用改"),
+            ("腾讯云 SecretId", self.v_tsid, "",
+             "腾讯云密钥（控制台 → 访问管理 → API密钥管理）。"
+             "只有「部署平台」选 tencent 时才用得到"),
+            ("腾讯云 SecretKey", self.v_tskey, "*",
+             "配了它，下面的暂停/恢复按钮才能真的开关云函数，也能直接部署"),
+            ("腾讯云地域", self.v_tregion, "", "函数所在地域，默认 ap-guangzhou"),
         ]):
             ttk.Label(right, text=lb).grid(row=i, column=0, padx=(10, 3), pady=4, sticky="e")
-            ttk.Entry(right, textvariable=var, width=30, show=show).grid(row=i, column=1, sticky="w")
+            e = ttk.Entry(right, textvariable=var, width=30, show=show)
+            e.grid(row=i, column=1, sticky="w")
+            e.bind("<Enter>", lambda ev, t=tip: self.hint(t))
 
         # ---------- 按钮 ----------
         bbox = ttk.Frame(root)
         bbox.pack(fill="x", padx=10, pady=(8, 2))
         self.busy = False
-        for text, cmd in [("保存配置", self.on_save),
-                          ("立即扫描（不推送）", self.on_scan),
-                          ("测试微信推送", self.on_test),
-                          ("同步到 GitHub（云端生效）", self.on_sync)]:
-            ttk.Button(bbox, text=text, command=cmd).pack(side="left", padx=4)
+        for text, cmd, tip in [("保存配置", self.on_save,
+                                "把界面上的改动写进 monitor_config.json（只在本机）"),
+                               ("立即扫描（不推送）", self.on_scan,
+                                "本机跑一轮，只看结果不发微信，用来试配置"),
+                               ("测试微信推送", self.on_test,
+                                "发一条测试消息，确认微信能收到"),
+                               ("同步到 GitHub（云端生效）", self.on_sync,
+                                "把配置和代码推到仓库，GitHub Actions 会照新配置跑"),
+                               ("部署到腾讯云（云端生效）", self.on_deploy_cloud,
+                                "打包上传代码到腾讯云函数。用的是右边填的腾讯云密钥，"
+                                "改了行程后必须点这个，云端才会按新配置跑")]:
+            b = ttk.Button(bbox, text=text, command=cmd)
+            b.pack(side="left", padx=4)
+            b.bind("<Enter>", lambda ev, t=tip: self.hint(t))
 
         # ---------- 部署平台 ----------
         dbox = ttk.LabelFrame(root, text=" 部署平台（想把监控换到别的地方跑就选这里）")
@@ -769,6 +805,10 @@ class App:
             raise ValueError("至少填一个日期")
         cfg["dates"] = dates
         cfg["date_prefs"] = prefs
+        try:
+            cfg["heartbeat_hour"] = max(0, min(23, int(str(self.v_hb.get()).strip() or 8)))
+        except ValueError:
+            cfg["heartbeat_hour"] = 8
         cfg["origins"] = split_codes(self.v_origins.get())
         cfg["dest"] = self.v_dest.get().strip().upper()
         cfg["transfer_cities"] = split_codes(self.v_mid.get())
@@ -825,6 +865,9 @@ class App:
         c["wxpusher_spt"] = self.v_spt.get().strip()
         c["github_pat"] = self.v_pat.get().strip()
         c["github_repo"] = self.v_repo.get().strip()
+        c["tencent_sid"] = self.v_tsid.get().strip()
+        c["tencent_skey"] = self.v_tskey.get().strip()
+        c["tencent_region"] = self.v_tregion.get().strip() or "ap-guangzhou"
         save_cred(c)
         self.say("[保存] 已写入 %s\n" % CONFIG_FILE)
 
@@ -981,15 +1024,61 @@ class App:
     def _wf_path(repo):
         return "/repos/%s/contents/%s" % (repo, urllib.parse.quote(WF_PATH))
 
-    def on_status(self):
-        pat, repo = self._cred()
-        if not pat:
+    def on_deploy_cloud(self):
+        """把当前代码+配置直接打包传到腾讯云函数（改完行程一定要点这个）"""
+        if self.busy:
             return
+        if self._plat() != "tencent":
+            messagebox.showinfo(
+                "部署平台不是腾讯云",
+                "下面的「部署平台」现在是 %s。\n"
+                "要部署到腾讯云，先把它改成 tencent 并保存。\n\n"
+                "（它决定的是：关闭/恢复按钮管谁、部署按钮往哪传）"
+                % (self.v_platform.get() or "github"))
+            return
+        self.on_save()
         self.busy = True
-        threading.Thread(target=self._status, args=(pat, repo), daemon=True).start()
+        threading.Thread(target=self._deploy_cloud, daemon=True).start()
 
-    def _status(self, pat, repo):
+    def _deploy_cloud(self):
         try:
+            if dt is None:
+                print("[部署] 缺 deploy_tencent.py，没法部署。\n")
+                return
+            sid, skey, region = self._tencent_cred()
+            if not (sid and skey):
+                print("[部署] 还没填腾讯云密钥。\n"
+                      "       在右边「推送与同步凭据」里填 SecretId 和 SecretKey 再点。\n")
+                return
+            print("[部署] 打包并上传到腾讯云 %s，约 30 秒 …\n" % region)
+            rc = dt.deploy(region, sid, skey, log=self.say)
+            print("\n[部署] %s\n" % ("完成" if rc == 0
+                                  else "结束，返回码 %s（看上面的输出）" % rc))
+        finally:
+            self.busy = False
+
+    # ---- 云端开关（按「部署平台」决定管谁）----
+    def _plat(self):
+        """当前连的是哪个平台：tencent 就操作云函数，其它就操作 GitHub Actions"""
+        return (self.v_platform.get() or "github").strip().lower()
+
+    def _tencent_cred(self):
+        c = load_cred()
+        return ((c.get("tencent_sid") or "").strip(),
+                (c.get("tencent_skey") or "").strip(),
+                (c.get("tencent_region") or "ap-guangzhou").strip())
+
+    def on_status(self):
+        self.busy = True
+        threading.Thread(target=self._status, daemon=True).start()
+
+    def _status(self):
+        try:
+            if self._plat() == "tencent":
+                return self._t_status()
+            pat, repo = self._cred()
+            if not pat:
+                return
             cur, err = gh("GET", self._wf_path(repo) + "?ref=main", pat)
             if err and "404" not in str(err):
                 print("[云端] 查询失败：%s\n" % err)
@@ -1007,25 +1096,53 @@ class App:
         finally:
             self.busy = False
 
-    def on_stop(self):
-        pat, repo = self._cred()
-        if not pat:
+    def _t_status(self):
+        sid, skey, region = self._tencent_cred()
+        if dt is None:
+            print("[云端] 缺 deploy_tencent.py，管不了腾讯云。\n"); return
+        if not (sid and skey):
+            print("[云端] 查不了：还没填腾讯云密钥。\n"
+                  "       在右边「推送与同步凭据」里填 SecretId 和 SecretKey，\n"
+                  "       保存后这个按钮就能直接开关云函数了。\n")
             return
+        on, msg = dt.trigger_on(region, sid, skey)
+        if on is None:
+            print("[云端] 查询失败：%s\n" % msg)
+        elif on:
+            print("[云端] 腾讯云函数正在跑（%s）。\n"
+                  "       每分钟扫一次，发现新票就推微信。\n" % msg)
+        else:
+            print("[云端] 已暂停：云函数触发器关闭中，不会扫描也不会推送。\n"
+                  "       函数代码和配置都还在，点「恢复云端监控」就能继续。\n")
+
+    def on_stop(self):
+        plat = self._plat()
+        if plat == "tencent":
+            what = ("暂停腾讯云函数的定时触发器（%s）。\n"
+                    "       函数、代码、配置全部保留，点「恢复」就能接着跑。\n" % dt.FUNC_NAME)
+        else:
+            what = ("删掉仓库里的定时任务文件（GitHub Actions 不再跑）。\n"
+                    "       配置和仓库文件全部保留，随时可恢复。\n")
         if not messagebox.askyesno(
                 "确认关闭云端监控",
                 "关闭后：\n"
                 "  · 云端不再扫描余票\n"
-                "  · 微信不再收到推送\n"
-                "  · 配置和仓库文件全部保留，随时可恢复\n\n"
-                "另外：本地那个「云端监控心跳」定时任务不归本工具管，\n"
+                "  · 微信不再收到推送\n\n"
+                "本次执行：\n       " + what +
+                "\n另外：本地那个「云端监控心跳」定时任务不归本工具管，\n"
                 "需要在 WorkBuddy 的定时任务界面里单独暂停。\n\n"
                 "确定关闭吗？"):
             return
         self.busy = True
-        threading.Thread(target=self._stop, args=(pat, repo), daemon=True).start()
+        threading.Thread(target=self._stop, daemon=True).start()
 
-    def _stop(self, pat, repo):
+    def _stop(self):
         try:
+            if self._plat() == "tencent":
+                return self._t_switch(False)
+            pat, repo = self._cred()
+            if not pat:
+                return
             path = self._wf_path(repo)
             cur, err = gh("GET", path + "?ref=main", pat)
             if err or not (isinstance(cur, dict) and cur.get("sha")):
@@ -1043,15 +1160,36 @@ class App:
         finally:
             self.busy = False
 
-    def on_resume(self):
-        pat, repo = self._cred()
-        if not pat:
+    def _t_switch(self, enable):
+        """开关腾讯云的定时触发器（函数本身不动）"""
+        if dt is None:
+            print("[云端] 缺 deploy_tencent.py，管不了腾讯云。\n")
             return
-        self.busy = True
-        threading.Thread(target=self._resume, args=(pat, repo), daemon=True).start()
+        sid, skey, region = self._tencent_cred()
+        if not (sid and skey):
+            print("[云端] 操作不了：还没填腾讯云密钥。\n"
+                  "       在右边「推送与同步凭据」里填 SecretId / SecretKey 并保存。\n")
+            return
+        ok, msg = dt.set_trigger(region, sid, skey, enable)
+        if not ok:
+            print("[云端] %s失败：%s\n" % ("暂停" if not enable else "恢复", msg))
+        else:
+            print("[云端] 已%s：腾讯云函数%s扫描。\n"
+                  "       电脑关机也照样跑，有新票就推微信。\n"
+                  % ("暂停" if not enable else "恢复",
+                     "停止" if not enable else "恢复每分钟"))
 
-    def _resume(self, pat, repo):
+    def on_resume(self):
+        self.busy = True
+        threading.Thread(target=self._resume, daemon=True).start()
+
+    def _resume(self):
         try:
+            if self._plat() == "tencent":
+                return self._t_switch(True)
+            pat, repo = self._cred()
+            if not pat:
+                return
             path = self._wf_path(repo)
             cur, err = gh("GET", path + "?ref=main", pat)
             if not err and isinstance(cur, dict) and cur.get("sha"):

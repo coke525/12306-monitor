@@ -3467,5 +3467,7 @@
   "_换行程示例_1_只换日期时段": "dates 改成 [\"2026-10-08\"]，date_prefs 里加一条 \"2026-10-08\": {\"dep_from\":\"08:00\",\"dep_to\":\"14:00\",\"arr_zz_by\":null,\"final_by\":\"18:00\"}。两个必须成对出现，只改 dates 不加 date_prefs 的话，那天不会命中也不会推送。",
   "_换行程示例_3_换出发地": "origins 改成新出发站的电报码数组即可。",
   "_换行程示例_2_换目的地": "比如平顶山去洛阳(LYF)：dest 改 \"LYF\"，transfer_cities 改成途经的换乘大站，via 没有二次换乘就填 \"LYF\"，fast_mid 同步改成 transfer_cities 里的站。站名对应代码在 stations 里查（3404 个全在里面）。",
-  "companions": []
+  "companions": [],
+  "platform": "tencent",
+  "heartbeat_hour": 8
 }

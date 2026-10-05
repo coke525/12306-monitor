@@ -42,8 +42,9 @@ build6/
 _probe_state.json
 dist7/
 build7/
-deploy_tencent.py
 cloud_state.json
 _deploy_check.zip
 _deploy_out.txt
 _finish_deploy.py
+_shot_gui.py
+_gui_shot.png
