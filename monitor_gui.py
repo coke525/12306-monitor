@@ -356,6 +356,18 @@ class App:
         cfg = load_cfg()
         cred = load_cred()
 
+        # ---------- 查车站代码（放在最上面：填行程/同行人之前先来这儿查码） ----------
+        qbox = ttk.LabelFrame(root, text=" 查车站代码（输中文站名或三字母代码，全国车站都能查）")
+        qbox.pack(fill="x", padx=10, pady=(10, 6))
+        self.stations = station_map()
+        self.v_q = tk.StringVar()
+        self.q_res = tk.StringVar(value="共 %d 个车站已内置" % len(self.stations))
+        qe = ttk.Entry(qbox, textvariable=self.v_q, width=18)
+        qe.pack(side="left", padx=(10, 4), pady=8)
+        qe.bind("<Return>", lambda ev: self.on_query())
+        ttk.Button(qbox, text="查", command=self.on_query, width=4).pack(side="left")
+        ttk.Label(qbox, textvariable=self.q_res, foreground="#06c").pack(side="left", padx=10)
+
         # ---------- 行程 ----------
         box = ttk.LabelFrame(root, text=" 行程（填电报码，多个用逗号隔开）")
         box.pack(fill="x", padx=10, pady=(10, 6))
@@ -407,36 +419,19 @@ class App:
         ttk.Label(box, text="路线 = 出发站 → 换乘城市 → 二次换乘 → 三次换乘 → 终点（中间层可跳过，最多 4 段）",
                   foreground="#888").grid(row=2, column=0, columnspan=10, sticky="w", padx=10, pady=(2, 6))
 
-        # ---------- 日期与时段 ----------
-        dbox = ttk.LabelFrame(root, text=" 日期与时间窗口（每天一行；留空 = 不限制）")
-        dbox.pack(fill="x", padx=10, pady=6)
-        head = ["日期", "最早出发", "最晚出发", "最晚到换乘站", "最晚到终点"]
-        for i, h in enumerate(head):
-            ttk.Label(dbox, text=h, foreground="#555").grid(row=0, column=i, padx=6, pady=(6, 2))
-        self.rows = []
-        self.dbody = ttk.Frame(dbox)
-        self.dbody.grid(row=1, column=0, columnspan=5, sticky="w")
-        prefs = cfg.get("date_prefs") or {}
-        for d in (cfg.get("dates") or []):
-            self.add_row(d, prefs.get(d) or {})
-        if not self.rows:
-            self.add_row("", {})
-        btns = ttk.Frame(dbox)
-        btns.grid(row=2, column=0, columnspan=5, sticky="w", padx=6, pady=6)
-        ttk.Button(btns, text="+ 加一天", command=lambda: self.add_row("", {})).pack(side="left")
-        ttk.Button(btns, text="− 删最后一行", command=self.del_row).pack(side="left", padx=6)
-        ttk.Label(btns, text="日期必须和上面窗口成对出现；只填日期不加窗口 → 那天不会推送",
-                  foreground="#a00").pack(side="left", padx=12)
-
-        # ---------- 同行人 ----------
+        # ---------- 同行人（紧跟行程：同行人本来就是行程的一部分） ----------
         cbox = ttk.LabelFrame(root, text=" 同行人（先一起坐，到分手站再分开；不加就是单人出行）")
         cbox.pack(fill="x", padx=10, pady=6)
-        chead = ["称呼", "他的终点", "分手站", "共同段要几张票", "他最晚到达"]
-        for i, h in enumerate(chead):
-            ttk.Label(cbox, text=h, foreground="#555").grid(row=0, column=i, padx=6, pady=(6, 2))
         self.crows = []
+        # 表头和输入框放进同一个表格：列宽取二者较宽者，框用 sticky=ew 撑满列，
+        # 二级标题就正好落在框的正上方（以前标题挂在外层，和框各算各的列宽才对不齐）
         self.cbody = ttk.Frame(cbox)
-        self.cbody.grid(row=1, column=0, columnspan=5, sticky="w")
+        self.cbody.pack(anchor="w", padx=6, pady=(6, 0))
+        chead = ["称呼", "他的终点", "分手站", "共同段要几张票", "他最晚到达"]
+        for i, (h, w) in enumerate(zip(chead, (90, 90, 148, 112, 100))):
+            ttk.Label(self.cbody, text=h, foreground="#555").grid(
+                row=0, column=i, padx=4, pady=(0, 3), sticky="w")
+            self.cbody.columnconfigure(i, minsize=w)
         comps = cfg.get("companions")
         if comps is None and isinstance(cfg.get("companion"), dict):
             comps = [cfg["companion"]]          # 兼容旧的单人写法
@@ -444,24 +439,36 @@ class App:
             if isinstance(c, dict):
                 self.add_comp(c)
         cbtns = ttk.Frame(cbox)
-        cbtns.grid(row=2, column=0, columnspan=5, sticky="w", padx=6, pady=6)
+        cbtns.pack(anchor="w", padx=6, pady=6)
         ttk.Button(cbtns, text="+ 添加朋友", command=lambda: self.add_comp({})).pack(side="left")
         ttk.Button(cbtns, text="− 删最后一行", command=self.del_comp).pack(side="left", padx=6)
-        ttk.Label(cbtns, text="终点和分手站填电报码（用上面的查询框查）；"
+        ttk.Label(cbtns, text="终点和分手站填电报码（用最上面的查询框查）；"
                              "「最晚到达」留空 = 跟主终点用同一个底线",
                   foreground="#a00").pack(side="left", padx=12)
 
-        # ---------- 查车站代码 ----------
-        qbox = ttk.LabelFrame(root, text=" 查车站代码（输中文站名或三字母代码，全国车站都能查）")
-        qbox.pack(fill="x", padx=10, pady=6)
-        self.stations = station_map()
-        self.v_q = tk.StringVar()
-        self.q_res = tk.StringVar(value="共 %d 个车站已内置" % len(self.stations))
-        e = ttk.Entry(qbox, textvariable=self.v_q, width=18)
-        e.pack(side="left", padx=(10, 4), pady=8)
-        e.bind("<Return>", lambda ev: self.on_query())
-        ttk.Button(qbox, text="查", command=self.on_query, width=4).pack(side="left")
-        ttk.Label(qbox, textvariable=self.q_res, foreground="#06c").pack(side="left", padx=10)
+        # ---------- 日期与时段 ----------
+        dbox = ttk.LabelFrame(root, text=" 日期与时间窗口（每天一行；留空 = 不限制）")
+        dbox.pack(fill="x", padx=10, pady=6)
+        self.rows = []
+        # 同样：表头和输入框同一个表格，标题正好压在框上方
+        self.dbody = ttk.Frame(dbox)
+        self.dbody.pack(anchor="w", padx=6, pady=(6, 0))
+        dhead = ["日期", "最早出发", "最晚出发", "最晚到换乘站", "最晚到终点"]
+        for i, (h, w) in enumerate(zip(dhead, (108, 84, 84, 108, 88))):
+            ttk.Label(self.dbody, text=h, foreground="#555").grid(
+                row=0, column=i, padx=4, pady=(0, 3), sticky="w")
+            self.dbody.columnconfigure(i, minsize=w)
+        prefs = cfg.get("date_prefs") or {}
+        for d in (cfg.get("dates") or []):
+            self.add_row(d, prefs.get(d) or {})
+        if not self.rows:
+            self.add_row("", {})
+        btns = ttk.Frame(dbox)
+        btns.pack(anchor="w", padx=6, pady=6)
+        ttk.Button(btns, text="+ 加一天", command=lambda: self.add_row("", {})).pack(side="left")
+        ttk.Button(btns, text="− 删最后一行", command=self.del_row).pack(side="left", padx=6)
+        ttk.Label(btns, text="日期必须和上面窗口成对出现；只填日期不加窗口 → 那天不会推送",
+                  foreground="#a00").pack(side="left", padx=12)
 
         # ---------- 选项 + 凭据 ----------
         obox = ttk.Frame(root)
@@ -545,7 +552,7 @@ class App:
             "%s=%s" % (k, self.stations[k]) for k in
             ["PEN", "PDF", "BFF", "NFF", "ZZF", "ZAF", "ZIF", "JOF", "JIF", "NYF"]
             if k in self.stations) + "\n")
-        self.say("想查别的站，用上面的「查车站代码」框，输中文名即可。\n\n")
+        self.say("想查别的站，用最上面的「查车站代码」框，输中文名即可。\n\n")
 
     def on_query(self):
         kw = self.v_q.get().strip()
@@ -563,15 +570,18 @@ class App:
 
     # ---- 表格 ----
     def add_row(self, date, p):
-        """日期窗口一行；「最晚到终点」用下拉，既能选也能手输"""
-        r = len(self.rows)
+        """日期窗口一行；「最晚到终点」用下拉，既能选也能手输。
+        第 0 行留给表头，所以数据行从第 1 行开始；sticky=ew 让框撑满列宽，
+        表头就正好落在框的正上方。"""
+        r = len(self.rows) + 1
         vs = [tk.StringVar(value=date)]
         for k in ("dep_from", "dep_to", "arr_zz_by", "final_by"):
             vs.append(tk.StringVar(value=(p.get(k) or "")))
         for c, v in enumerate(vs[:4]):
-            ttk.Entry(self.dbody, textvariable=v, width=13).grid(row=r, column=c, padx=6, pady=2)
+            ttk.Entry(self.dbody, textvariable=v, width=13).grid(
+                row=r, column=c, padx=4, pady=2, sticky="ew")
         cb = ttk.Combobox(self.dbody, textvariable=vs[4], values=TIME_CHOICES, width=11)
-        cb.grid(row=r, column=4, padx=6, pady=2)
+        cb.grid(row=r, column=4, padx=4, pady=2, sticky="ew")
         cb.bind("<Enter>", lambda ev: self.hint(
             "到达终点的最晚时间，超过就不推给你。可直接选，也可手填（如 16:30）；留空=不限"))
         self.rows.append(vs)
@@ -579,16 +589,16 @@ class App:
     def del_row(self):
         if len(self.rows) <= 1:
             return
-        vs = self.rows.pop()
-        for v in vs:
-            pass
-        for w in self.dbody.grid_slaves(row=len(self.rows)):
+        self.rows.pop()
+        # 表头占第 0 行，被删掉的那行号 = 剩下的行数 + 1
+        for w in self.dbody.grid_slaves(row=len(self.rows) + 1):
             w.destroy()
 
     # ---- 同行人 ----
     def add_comp(self, c):
-        """一个同行人一行：称呼 / 他的终点 / 分手站 / 票数 / 他的最晚到达"""
-        r = len(self.crows)
+        """一个同行人一行：称呼 / 他的终点 / 分手站 / 票数 / 他的最晚到达。
+        第 0 行是表头，数据从第 1 行开始。"""
+        r = len(self.crows) + 1
         splits = c.get("split_at")
         if isinstance(splits, (list, tuple)):
             splits = ",".join(str(x) for x in splits)
@@ -599,19 +609,19 @@ class App:
               tk.StringVar(value=str(c.get("final_by") or ""))]
         for i, (w, tip) in enumerate([
                 (10, "随便起个名字，推送里会显示「可与XX同行」"),
-                (10, "他最终要到的站。用上面的查询框查电报码，如 洛阳龙门=LLF"),
+                (10, "他最终要到的站。用最上面的查询框查电报码，如 洛阳龙门=LLF"),
                 (16, "两人在哪个站分开，可填多个用逗号隔开，如 ZZF,ZAF（哪个都算）"),
         ]):
             e = ttk.Entry(self.cbody, textvariable=vs[i], width=w)
-            e.grid(row=r, column=i, padx=6, pady=2)
+            e.grid(row=r, column=i, padx=4, pady=2, sticky="ew")
             e.bind("<Enter>", lambda ev, t=tip: self.hint(t))
         cb = ttk.Combobox(self.cbody, textvariable=vs[3],
                           values=["2", "3", "4", "5", "6"], width=4)
-        cb.grid(row=r, column=3, padx=6, pady=2)
+        cb.grid(row=r, column=3, padx=4, pady=2, sticky="ew")
         cb.bind("<Enter>", lambda ev: self.hint(
             "共同乘坐那几段要一次买到几张（含你自己）。同一席位等级够这个数才算真能坐一起"))
         fb = ttk.Combobox(self.cbody, textvariable=vs[4], values=TIME_CHOICES, width=9)
-        fb.grid(row=r, column=4, padx=6, pady=2)
+        fb.grid(row=r, column=4, padx=4, pady=2, sticky="ew")
         fb.bind("<Enter>", lambda ev: self.hint(
             "他到目的地的最晚时间，可以跟你的不一样。留空 = 跟上面主终点的底线相同"))
         self.crows.append(vs)
@@ -620,7 +630,7 @@ class App:
         if not self.crows:
             return
         self.crows.pop()
-        for w in self.cbody.grid_slaves(row=len(self.crows)):
+        for w in self.cbody.grid_slaves(row=len(self.crows) + 1):
             w.destroy()
 
     def hint(self, t):
