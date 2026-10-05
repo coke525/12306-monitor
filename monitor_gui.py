@@ -302,9 +302,123 @@ def split_codes(s):
 
 
 def date_choices(days=60):
-    """日期下拉：今天起 days 天（12306 预售一般 15 天，给足冗余，也能手填）"""
+    """日期下拉：今天起 days 天。只为兼容老脚本保留，界面已改用 DateBox。"""
     today = datetime.date.today()
     return [(today + datetime.timedelta(days=i)).isoformat() for i in range(days)]
+
+
+def bind_hint_deep(w, fn):
+    """鼠标移到控件本身和它里面所有子控件上都触发提示"""
+    stack = [w]
+    while stack:
+        c = stack.pop()
+        c.bind("<Enter>", lambda ev: fn())
+        stack.extend(c.winfo_children())
+
+
+class DateBox(ttk.Frame):
+    """日期选择：年 / 月 / 日 三个下拉，不限制年份和月份。
+
+    年份框可以直接手输（想填 2030 就打 2030），月份 1-12 全部可选，
+    日号跟着年月自动变（2 月不会给你 30 号，闰年会有 29 号）。
+    对外仍然只操作那个 StringVar（"YYYY-MM-DD"），
+    所以写配置、跑扫描的代码一行都不用改。"""
+
+    def __init__(self, master, var, hint=None):
+        ttk.Frame.__init__(self, master)
+        self.var = var
+        self._lock = False
+        self.y = tk.StringVar()
+        self.mo = tk.StringVar()
+        self.d = tk.StringVar()
+        y0 = datetime.date.today().year
+        # 年份不做 readonly：下拉只是常用值，随便填哪一年都行
+        self.cby = ttk.Combobox(self, textvariable=self.y, width=5, justify="center",
+                                values=[str(y) for y in range(y0 - 1, y0 + 5)])
+        self.cby.pack(side="left")
+        ttk.Label(self, text="-").pack(side="left")
+        self.cbm = ttk.Combobox(self, textvariable=self.mo, width=3, justify="center",
+                                state="readonly",
+                                values=["%02d" % m for m in range(1, 13)])
+        self.cbm.pack(side="left")
+        ttk.Label(self, text="-").pack(side="left")
+        self.cbd = ttk.Combobox(self, textvariable=self.d, width=3, justify="center",
+                                state="readonly",
+                                values=["%02d" % i for i in range(1, 32)])
+        self.cbd.pack(side="left")
+        # 年月一变先把日号范围刷新，再拼回字符串
+        for v in (self.y, self.mo):
+            v.trace_add("write", lambda *_: self._days())
+        for v in (self.y, self.mo, self.d):
+            v.trace_add("write", lambda *_: self._out())
+        self.var.trace_add("write", lambda *_: self._in())
+        self._in()
+        if hint:
+            self.bind_hint(hint)
+
+    def bind_hint(self, fn):
+        bind_hint_deep(self, fn)
+
+    def _maxday(self):
+        """当前年月的天数；年份/月份还没填全就按 31 天给"""
+        try:
+            y, m = int(self.y.get() or 0), int(self.mo.get() or 0)
+        except ValueError:
+            return 31
+        if y <= 0 or not (1 <= m <= 12):
+            return 31
+        nxt = datetime.date(y + 1, 1, 1) if m == 12 else datetime.date(y, m + 1, 1)
+        return (nxt - datetime.timedelta(days=1)).day
+
+    def _days(self):
+        """刷新日号下拉；原来的日号超了就压到当月最后一天"""
+        n = self._maxday()
+        self.cbd.configure(values=["%02d" % i for i in range(1, n + 1)])
+        cur = (self.d.get() or "").strip()
+        if cur.isdigit() and int(cur) > n:
+            self.d.set("%02d" % n)
+
+    def _in(self):
+        """外部变量变了 → 拆到三个下拉里显示"""
+        if self._lock:
+            return
+        raw = (self.var.get() or "").strip()
+        y = mo = d = ""
+        if raw:
+            try:
+                ps = raw.replace("/", "-").replace(".", "-").split("-")
+                yi, mi, di = int(ps[0]), int(ps[1]), int(ps[2])
+                # 年份必须是 4 位（写成 26 年就当没填，别补成 0026）
+                if 1000 <= yi <= 9999 and 1 <= mi <= 12 and 1 <= di <= 31:
+                    y, mo, d = "%04d" % yi, "%02d" % mi, "%02d" % di
+            except Exception:      # noqa: BLE001  格式不认就留空让用户重选
+                pass
+        self._lock = True
+        try:
+            self.y.set(y)
+            self.mo.set(mo)
+            self.d.set(d)
+            self._days()
+        finally:
+            self._lock = False
+
+    def _out(self):
+        """下拉选了 → 拼回 YYYY-MM-DD；三个没选全就是空"""
+        if self._lock:
+            return
+        y, mo, d = (self.y.get() or "").strip(), (self.mo.get() or "").strip(), \
+                   (self.d.get() or "").strip()
+        self._lock = True
+        try:
+            if y and mo and d:
+                try:
+                    self.var.set("%04d-%02d-%02d" % (int(y), int(mo), int(d)))
+                except ValueError:            # 年份框里打了字母
+                    self.var.set("")
+            else:
+                self.var.set("")
+        finally:
+            self._lock = False
 
 
 class TimeBox(ttk.Frame):
@@ -340,11 +454,7 @@ class TimeBox(ttk.Frame):
 
     def bind_hint(self, fn):
         """鼠标移到整个控件（含里面两个下拉）上都触发提示"""
-        stack = [self]
-        while stack:
-            w = stack.pop()
-            w.bind("<Enter>", lambda ev: fn())
-            stack.extend(w.winfo_children())
+        bind_hint_deep(self, fn)
 
     def _norm(self, v):
         v = (v or "").strip()
@@ -544,7 +654,7 @@ class App:
         self.dbody = ttk.Frame(dbox)
         self.dbody.pack(anchor="w", padx=6, pady=(6, 0))
         dhead = ["日期", "最早出发", "最晚出发", "最晚到换乘站", "最晚到终点"]
-        for i, (h, w) in enumerate(zip(dhead, (124, 96, 96, 108, 100))):
+        for i, (h, w) in enumerate(zip(dhead, (176, 96, 96, 108, 100))):
             ttk.Label(self.dbody, text=h, foreground="#555").grid(
                 row=0, column=i, padx=4, pady=(0, 3), sticky="w")
             self.dbody.columnconfigure(i, minsize=w)
@@ -699,12 +809,11 @@ class App:
         vs = [tk.StringVar(value=date)]
         for k in ("dep_from", "dep_to", "arr_zz_by", "final_by"):
             vs.append(tk.StringVar(value=(p.get(k) or "")))
-        dc = ttk.Combobox(self.dbody, textvariable=vs[0], values=date_choices(),
-                          width=11)
+        # 日期：年 / 月 / 日 三个下拉，年份随便填、月份 1-12 全给
+        dc = DateBox(self.dbody, vs[0], hint=lambda: self.hint(
+            "哪天出发。年份、月份、日子分开选，不限制是哪年哪月；"
+            "年份框还能直接手输（比如填 2030）"))
         dc.grid(row=r, column=0, padx=4, pady=2, sticky="ew")
-        dc.bind("<Enter>", lambda ev: self.hint(
-            "哪天出发。下拉里是今天起 60 天，可以直接点选；"
-            "也可以自己手填 YYYY-MM-DD"))
         # 四个时间都用「时 + 分」两个下拉，精确到分钟，全天可点
         for c, tip in [
                 (1, "这天最早几点出发都行。下拉选到分钟；两个都选「不限」= 全天不挑"),
@@ -795,7 +904,12 @@ class App:
                 continue
             if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
                 raise ValueError("日期「%s」格式不对，要写成 YYYY-MM-DD"
-                                 "（点日期框的下拉直接选最省事）" % d)
+                                 "（用日期框的年月日三个下拉选最省事）" % d)
+            try:
+                datetime.date(int(d[:4]), int(d[5:7]), int(d[8:10]))
+            except ValueError:
+                raise ValueError("日期「%s」不是真实存在的日子，改一下"
+                                 "（2 月没有 30 号，闰年才有 2 月 29 号）" % d)
             dates.append(d)
             prefs[d] = {"dep_from": vs[1].get().strip() or "00:00",
                         "dep_to": vs[2].get().strip() or "23:59",
