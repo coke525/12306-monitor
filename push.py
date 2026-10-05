@@ -18,10 +18,17 @@
 import json
 import os
 import re
+import sys
 import urllib.parse
 import urllib.request
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 打包成 exe 后 __file__ 指向 PyInstaller 的临时解压目录（_MEIxxxx），
+# 照它去找 push_config.json 必然找不到 → 会误报「未配置任何推送通道」。
+# 冻结时改用 exe 所在目录，让凭据落在 exe 旁边，用户改完就能用。
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CFG = os.path.join(BASE_DIR, "push_config.json")
 
 PUSHPLUS_API = "http://www.pushplus.plus/send"
@@ -55,11 +62,23 @@ def wxpusher_spt(spt, title, content, short=None):
 
 
 def load_cfg():
+    cfg = {}
     try:
         with open(CFG, "r", encoding="utf-8") as fp:
-            return json.load(fp) or {}
+            cfg = json.load(fp) or {}
     except Exception:
-        return {}
+        cfg = {}
+    # 环境变量兜底（优先级低于文件）：云端 Actions 用 Secret 注入，
+    # 本地缺文件时也能跑通，避免误报「未配置任何推送通道」。
+    for key, env in (("wxpusher_spt", "WXPUSHER_SPT"),
+                     ("wxpusher_app_token", "WXPUSHER_TOKEN"),
+                     ("wxpusher_uid", "WXPUSHER_UID"),
+                     ("token", "PUSHPLUS_TOKEN")):
+        if not str(cfg.get(key) or "").strip():
+            v = os.environ.get(env, "").strip()
+            if v:
+                cfg[key] = v
+    return cfg
 
 
 def _post(url, payload):
