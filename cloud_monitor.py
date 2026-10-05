@@ -117,114 +117,153 @@ def cloud_send(title, content, short=None):
     return ok, " | ".join(msgs)
 
 
-def _gh_api(method, path, payload=None):
-    """仓库文件读写（用于 github 模式的状态存储）"""
+def _gh_api(method, path, payload=None, tries=3):
+    """仓库文件读写（用于 github 模式的状态存储），失败自动重试"""
     tok = os.environ.get("GITHUB_PAT", "").strip()
-    data = None
-    h = {"Accept": "application/vnd.github+json", "User-Agent": "12306-monitor"}
-    if tok:
-        h["Authorization"] = "Bearer " + tok
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-        h["Content-Type"] = "application/json"
-    req = urllib.request.Request("https://api.github.com" + path, data=data,
-                                 method=method, headers=h)
-    raw = urllib.request.urlopen(req, timeout=30).read()
-    return json.loads(raw.decode("utf-8", "ignore")) if raw.strip() else {}
+    last = None
+    for i in range(max(1, tries)):
+        data = None
+        h = {"Accept": "application/vnd.github+json", "User-Agent": "12306-monitor"}
+        if tok:
+            h["Authorization"] = "Bearer " + tok
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            h["Content-Type"] = "application/json"
+        req = urllib.request.Request("https://api.github.com" + path, data=data,
+                                     method=method, headers=h)
+        try:
+            raw = urllib.request.urlopen(req, timeout=30).read()
+            return json.loads(raw.decode("utf-8", "ignore")) if raw.strip() else {}
+        except Exception as e:      # noqa: BLE001
+            last = e
+            if i < tries - 1:
+                import time
+                time.sleep(2 * (i + 1))
+    raise last
 
 
 def _state_target():
-    """返回 (模式, 路径)：决定状态存在本地文件还是仓库里"""
+    """返回 (模式, 仓库内路径, 本地临时路径)：
+    github 模式的本地快照必须写到可写目录（云函数代码目录只读，/tmp 才可写）"""
     mode = (os.environ.get("STATE_MODE") or "auto").strip().lower()
     repo = os.environ.get("GITHUB_REPO", "").strip()
     have_pat = bool(os.environ.get("GITHUB_PAT", "").strip())
     if mode == "github" or (mode == "auto" and have_pat and repo):
-        return "github", os.environ.get("STATE_PATH") or "cloud_state.json"
-    return "file", os.environ.get("STATE_FILE") or os.path.join(BASE, "cloud_state.json")
+        repo_path = os.environ.get("STATE_PATH") or "cloud_state.json"
+        return "github", repo_path, _local_state_path(repo_path)
+    return "file", "", os.environ.get("STATE_FILE") or os.path.join(BASE, "cloud_state.json")
 
 
-def fetch_state(path):
+def _local_state_path(repo_path):
+    """云函数代码目录只读，本地快照放 /tmp；本机没有 /tmp 就退回代码目录"""
+    name = repo_path.replace("/", "_").replace("\\", "_")
+    for cand in (os.path.join("/tmp", name),
+                 os.path.join(BASE, name),
+                 os.path.join(os.getcwd(), name)):
+        try:
+            with open(cand, "a"):
+                pass
+            return cand
+        except Exception:       # noqa: BLE001
+            continue
+    return os.path.join("/tmp", name)
+
+
+_STATE_ERR = ""
+
+
+def fetch_state(repo_path, local_path):
     """github 模式：把仓库里的快照拉到本地临时文件，让 tm 照常读写"""
+    global _STATE_ERR
     import urllib.error
     try:
         cur = _gh_api("GET", "/repos/%s/contents/%s" % (
-            os.environ["GITHUB_REPO"], urllib.parse.quote(path)))
+            os.environ["GITHUB_REPO"], urllib.parse.quote(repo_path)))
         if isinstance(cur, dict) and cur.get("content"):
             import base64
-            with open(path, "wb") as fp:
+            with open(local_path, "wb") as fp:
                 fp.write(base64.b64decode(cur["content"]))
-            print("[cloud] 已从仓库读取状态快照 %s" % path)
+            print("[cloud] 已从仓库读取状态快照 %s" % repo_path)
             return True
+        _STATE_ERR = "内容为空: %s" % str(cur)[:120]
     except urllib.error.HTTPError as e:
+        _STATE_ERR = "HTTP %d: %s" % (e.code, e.read().decode("utf-8", "ignore")[:150])
         if e.code != 404:
-            print("[cloud] 读取状态失败 HTTP %d（按首次运行处理）" % e.code)
+            print("[cloud] 读取状态失败 %s（按首次运行处理）" % _STATE_ERR)
     except Exception as e:      # noqa: BLE001
-        print("[cloud] 读取状态失败 %s（按首次运行处理）" % repr(e)[:80])
+        _STATE_ERR = repr(e)[:150]
+        print("[cloud] 读取状态失败 %s（按首次运行处理）" % _STATE_ERR)
     return False
 
 
-def push_state(path):
+def push_state(repo_path, local_path):
     """github 模式：把更新后的快照写回仓库"""
+    global _STATE_ERR
     import base64
     try:
-        with open(path, "rb") as fp:
+        with open(local_path, "rb") as fp:
             content = base64.b64encode(fp.read()).decode("ascii")
         api_path = "/repos/%s/contents/%s" % (
-            os.environ["GITHUB_REPO"], urllib.parse.quote(path))
+            os.environ["GITHUB_REPO"], urllib.parse.quote(repo_path))
         cur = {}
         try:
             cur = _gh_api("GET", api_path)
         except Exception:       # noqa: BLE001
             pass
-        payload = {"message": "state: %s" % path, "content": content,
+        payload = {"message": "state: %s" % repo_path, "content": content,
                    "branch": os.environ.get("GITHUB_BRANCH") or "main"}
         if isinstance(cur, dict) and cur.get("sha"):
             payload["sha"] = cur["sha"]
         _gh_api("PUT", api_path, payload)
-        print("[cloud] 状态快照已写回仓库 %s" % path)
+        print("[cloud] 状态快照已写回仓库 %s" % repo_path)
         return True
     except Exception as e:      # noqa: BLE001
-        print("[cloud] 写回状态失败 %s（不影响本次推送）" % repr(e)[:100])
+        _STATE_ERR = repr(e)[:150]
+        print("[cloud] 写回状态失败 %s（不影响本次推送）" % _STATE_ERR)
         return False
 
 
 def run_once():
-    """跑一轮：拉状态 → 扫描对比 → 推送 → 存状态。云函数直接调这个。"""
-    mode, state = _state_target()
-    tm.SNAPSHOT = state
+    """跑一轮：拉状态 → 扫描对比 → 推送 → 存状态。云函数直接调这个。
+    返回状态信息字典，云函数入口会把它放进返回值，方便排查。"""
+    global _STATE_ERR
+    _STATE_ERR = ""
+    mode, repo_path, local_path = _state_target()
+    tm.SNAPSHOT = local_path
     _push.send = cloud_send
+    info = {"mode": mode, "repo_path": repo_path, "local_path": local_path}
 
     argv = [sys.argv[0]] + sys.argv[1:]
     if mode == "github":
-        print("[cloud] 状态模式：github（%s@%s）"
-              % (state, os.environ.get("GITHUB_REPO")))
-        got = fetch_state(state)
+        print("[cloud] 状态模式：github（%s@%s，本地暂存 %s）"
+              % (repo_path, os.environ.get("GITHUB_REPO"), local_path))
+        got = fetch_state(repo_path, local_path)
         first_run = not got
+        info["fetch"] = ("ok" if got else "FAIL: %s" % _STATE_ERR)[:200]
     else:
-        first_run = not os.path.exists(state)
+        first_run = not os.path.exists(local_path)
+        info["fetch"] = "file:" + ("exists" if not first_run else "missing")
 
     if (first_run and "--showall" not in argv
             and os.environ.get("SKIP_FIRST_PUSH", "1") == "1"):
         # 第一次在云端跑，还没有基线，先把当前余票存下来，避免一上来刷屏
         argv.append("--nopush")
+        info["first_run"] = True
         print("[cloud] 首次运行，只建立基线快照，不推送")
     sys.argv = argv
     rc = tm.main()
 
-    if mode == "github" and os.path.exists(state):
-        push_state(state)
-    return rc
+    info["rc"] = rc
+    if mode == "github" and os.path.exists(local_path):
+        info["push"] = ("ok" if push_state(repo_path, local_path)
+                        else ("FAIL: %s" % _STATE_ERR)[:200])
+    return info
 
 
 def main():
-    return run_once()
-    if (first_run and "--showall" not in argv
-            and os.environ.get("SKIP_FIRST_PUSH", "1") == "1"):
-        # 第一次在云端跑，还没有基线，先把当前余票存下来，避免一上来刷屏
-        argv.append("--nopush")
-        print("[cloud] 首次运行，只建立基线快照，不推送")
-    sys.argv = argv
-    return tm.main()
+    info = run_once()
+    rc = info.get("rc") if isinstance(info, dict) else info
+    return rc if rc is not None else 0
 
 
 if __name__ == "__main__":
