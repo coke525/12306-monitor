@@ -14,8 +14,19 @@
   PUSHPLUS_TOKEN    PushPlus token（可选，需实名）
   WXPUSHER_TOKEN    WxPusher 应用 appToken（AT_ 开头，可选）
   WXPUSHER_UID      WxPusher 用户 UID（可选，配上面一起用）
-  STATE_FILE        快照路径，默认 ./cloud_state.json
   SKIP_FIRST_PUSH   首次运行（无快照）只建基线、不推送，默认 1
+
+状态存储（跨次运行记住"上次余票"，否则每次都当新票刷屏）：
+  STATE_MODE        auto / file / github，默认 auto
+                    auto = 配了 GITHUB_PAT 就用 github，否则用本地文件
+  STATE_FILE        file 模式下的快照路径，默认 ./cloud_state.json
+  GITHUB_PAT        github 模式下读写仓库用（PAT 或 GITHUB_TOKEN 都行）
+  GITHUB_REPO       github 模式下的仓库，如 coke525/12306-monitor
+  STATE_PATH        github 模式下仓库里的文件路径，默认 cloud_state.json
+
+为什么需要 github 模式：云函数（腾讯云 SCF / 阿里云 FC）是无状态的，
+容器回收后 /tmp 就清空了，本地文件存不住状态；改成读写仓库里的文件即可通用。
+GitHub Actions 继续用 file 模式（配合 git 提交），行为不变。
 
 用法：
   python cloud_monitor.py              # 扫描 + 对比 + 推送
@@ -106,13 +117,107 @@ def cloud_send(title, content, short=None):
     return ok, " | ".join(msgs)
 
 
-def main():
-    state = os.environ.get("STATE_FILE") or os.path.join(BASE, "cloud_state.json")
+def _gh_api(method, path, payload=None):
+    """仓库文件读写（用于 github 模式的状态存储）"""
+    tok = os.environ.get("GITHUB_PAT", "").strip()
+    data = None
+    h = {"Accept": "application/vnd.github+json", "User-Agent": "12306-monitor"}
+    if tok:
+        h["Authorization"] = "Bearer " + tok
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        h["Content-Type"] = "application/json"
+    req = urllib.request.Request("https://api.github.com" + path, data=data,
+                                 method=method, headers=h)
+    raw = urllib.request.urlopen(req, timeout=30).read()
+    return json.loads(raw.decode("utf-8", "ignore")) if raw.strip() else {}
+
+
+def _state_target():
+    """返回 (模式, 路径)：决定状态存在本地文件还是仓库里"""
+    mode = (os.environ.get("STATE_MODE") or "auto").strip().lower()
+    repo = os.environ.get("GITHUB_REPO", "").strip()
+    have_pat = bool(os.environ.get("GITHUB_PAT", "").strip())
+    if mode == "github" or (mode == "auto" and have_pat and repo):
+        return "github", os.environ.get("STATE_PATH") or "cloud_state.json"
+    return "file", os.environ.get("STATE_FILE") or os.path.join(BASE, "cloud_state.json")
+
+
+def fetch_state(path):
+    """github 模式：把仓库里的快照拉到本地临时文件，让 tm 照常读写"""
+    import urllib.error
+    try:
+        cur = _gh_api("GET", "/repos/%s/contents/%s" % (
+            os.environ["GITHUB_REPO"], urllib.parse.quote(path)))
+        if isinstance(cur, dict) and cur.get("content"):
+            import base64
+            with open(path, "wb") as fp:
+                fp.write(base64.b64decode(cur["content"]))
+            print("[cloud] 已从仓库读取状态快照 %s" % path)
+            return True
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            print("[cloud] 读取状态失败 HTTP %d（按首次运行处理）" % e.code)
+    except Exception as e:      # noqa: BLE001
+        print("[cloud] 读取状态失败 %s（按首次运行处理）" % repr(e)[:80])
+    return False
+
+
+def push_state(path):
+    """github 模式：把更新后的快照写回仓库"""
+    import base64
+    try:
+        with open(path, "rb") as fp:
+            content = base64.b64encode(fp.read()).decode("ascii")
+        api_path = "/repos/%s/contents/%s" % (
+            os.environ["GITHUB_REPO"], urllib.parse.quote(path))
+        cur = {}
+        try:
+            cur = _gh_api("GET", api_path)
+        except Exception:       # noqa: BLE001
+            pass
+        payload = {"message": "state: %s" % path, "content": content,
+                   "branch": os.environ.get("GITHUB_BRANCH") or "main"}
+        if isinstance(cur, dict) and cur.get("sha"):
+            payload["sha"] = cur["sha"]
+        _gh_api("PUT", api_path, payload)
+        print("[cloud] 状态快照已写回仓库 %s" % path)
+        return True
+    except Exception as e:      # noqa: BLE001
+        print("[cloud] 写回状态失败 %s（不影响本次推送）" % repr(e)[:100])
+        return False
+
+
+def run_once():
+    """跑一轮：拉状态 → 扫描对比 → 推送 → 存状态。云函数直接调这个。"""
+    mode, state = _state_target()
     tm.SNAPSHOT = state
     _push.send = cloud_send
 
     argv = [sys.argv[0]] + sys.argv[1:]
-    first_run = not os.path.exists(state)
+    if mode == "github":
+        print("[cloud] 状态模式：github（%s@%s）"
+              % (state, os.environ.get("GITHUB_REPO")))
+        got = fetch_state(state)
+        first_run = not got
+    else:
+        first_run = not os.path.exists(state)
+
+    if (first_run and "--showall" not in argv
+            and os.environ.get("SKIP_FIRST_PUSH", "1") == "1"):
+        # 第一次在云端跑，还没有基线，先把当前余票存下来，避免一上来刷屏
+        argv.append("--nopush")
+        print("[cloud] 首次运行，只建立基线快照，不推送")
+    sys.argv = argv
+    rc = tm.main()
+
+    if mode == "github" and os.path.exists(state):
+        push_state(state)
+    return rc
+
+
+def main():
+    return run_once()
     if (first_run and "--showall" not in argv
             and os.environ.get("SKIP_FIRST_PUSH", "1") == "1"):
         # 第一次在云端跑，还没有基线，先把当前余票存下来，避免一上来刷屏
