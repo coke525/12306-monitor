@@ -36,3 +36,7 @@ dist3/
 build3/
 dist5/
 build5/
+dist6/
+build6/
+部署包_*/
+_probe_state.json
