@@ -118,6 +118,149 @@ jobs:
 """
 
 
+# ---------------------------------------------------------------- 部署包
+
+# 部署包里必须带的运行文件（少了任何一个都跑不起来）
+DEPLOY_FILES = ["cloud_monitor.py", "train_monitor.py", "push.py", "cloud_function.py"]
+
+PLAT_DIR = {
+    "github": "部署包_GitHubActions",
+    "tencent": "部署包_腾讯云函数",
+    "aliyun": "部署包_阿里云函数",
+    "server": "部署包_自己的服务器",
+}
+
+DEPLOY_STEPS = {
+    "github": (
+        "GitHub Actions 后续操作：\n"
+        "  1. 把包里的文件推到仓库根目录（cloud_monitor.py / train_monitor.py /\n"
+        "     push.py / monitor_config.json）\n"
+        "  2. 仓库 Settings → Secrets → 加 WXPUSHER_SPT\n"
+        "  3. Actions 页面确认 workflow 存在（没有就点「恢复云端监控」装回去）\n"
+        "  4. 手动 Run workflow 一次验证\n"
+    ),
+    "tencent": (
+        "腾讯云函数 SCF 后续操作：\n"
+        "  1. 控制台 → 云函数 → 新建 → 选择「从头创建」\n"
+        "  2. 运行环境选 Python 3.10，地域随便（境内即可）\n"
+        "  3. 函数代码：本地上传 zip —— 把本目录 5 个文件打成 zip 上传\n"
+        "  4. 执行方法填：cloud_function.main_handler\n"
+        "  5. 环境变量加 3 个（内容见 环境变量.txt）\n"
+        "  6. 触发方式 → 定时触发器 → Cron 填：0 */1 * * * *（每 1 分钟）\n"
+        "     注意：腾讯云 cron 是 6 位（秒 分 时 日 月 周）\n"
+        "  7. 内存 128M 够，超时时间设 120 秒\n"
+    ),
+    "aliyun": (
+        "阿里云函数计算 FC 后续操作：\n"
+        "  1. 控制台 → 函数计算 → 服务及函数 → 创建函数\n"
+        "  2. 运行环境选 Python 3.10，上传代码选「文件夹上传」→ 选本目录\n"
+        "  3. 函数入口填：cloud_function.handler\n"
+        "  4. 环境变量加 3 个（内容见 环境变量.txt）\n"
+        "  5. 触发器 → 定时触发器 → Cron 填：0 */1 * * * *（每 1 分钟）\n"
+        "     阿里云 cron 也是 6 位（秒 分 时 日 月 周）\n"
+        "  6. 超时时间设 120 秒，内存 128M 够\n"
+    ),
+    "server": (
+        "自己的服务器 / 云主机 / 常开的电脑：\n"
+        "  1. 把本目录整份拷到服务器上，装好 Python 3.9+\n"
+        "  2. chmod +x run.sh\n"
+        "  3. 先手动跑一次验证：./run.sh\n"
+        "  4. 配定时任务（二选一）\n"
+        "     crontab -e 里加一行（每分钟）：\n"
+        "       * * * * * cd /你的路径 && ./run.sh >> scan.log 2>&1\n"
+        "     或用 systemd timer，见 systemd/ 目录\n"
+        "  5. 环境变量写在 run.sh 里，记得改成你自己的 token\n"
+    ),
+}
+
+
+def _read_source(name, repo="", pat=""):
+    """取运行文件的源码：本地有就用本地（开发环境），
+    打包成 exe 后本地没有 .py 文件，就从 GitHub 仓库拉最新版。"""
+    local = os.path.join(BASE, name)
+    if os.path.exists(local):
+        with io.open(local, "r", encoding="utf-8") as fp:
+            return fp.read()
+    if repo and pat:
+        try:
+            cur, err = gh("GET", "/repos/%s/contents/%s?ref=main" % (repo, name), pat)
+            if not err and isinstance(cur, dict) and cur.get("content"):
+                return base64.b64decode(cur["content"]).decode("utf-8", "ignore")
+        except Exception:       # noqa: BLE001
+            pass
+    return ""
+
+
+def make_deploy_package(plat, cfg, spt, pat, repo, mode, seated):
+    """按平台生成一份可直接上传的部署包目录，返回目录路径"""
+    outdir = os.path.join(BASE, PLAT_DIR.get(plat, "部署包"))
+    if not os.path.isdir(outdir):
+        os.makedirs(outdir)
+
+    missing = []
+    for name in DEPLOY_FILES:
+        txt = _read_source(name, repo, pat)
+        if not txt:
+            missing.append(name)
+            continue
+        with io.open(os.path.join(outdir, name), "w", encoding="utf-8") as fp:
+            fp.write(txt)
+
+    # 配置：带上当前填好的行程
+    cfg2 = dict(cfg)
+    cfg2["platform"] = plat
+    cfg2.pop("_怎么用", None)
+    with io.open(os.path.join(outdir, "monitor_config.json"), "w",
+                 encoding="utf-8") as fp:
+        json.dump(cfg2, fp, ensure_ascii=False, indent=2)
+
+    # 环境变量清单（云函数直接照抄）
+    env = [
+        "# 微信推送 token（必填）",
+        "WXPUSHER_SPT=%s" % (spt or "SPT_你的token"),
+        "",
+        "# 状态快照存哪里 —— 云函数无状态，必须配这两个",
+        "GITHUB_PAT=%s" % (pat or "ghp_你的令牌"),
+        "GITHUB_REPO=%s" % (repo or "用户名/仓库名"),
+        "",
+        "# 可选：PushPlus（需实名）、WxPusher 应用通道",
+        "PUSHPLUS_TOKEN=",
+        "WXPUSHER_TOKEN=",
+        "WXPUSHER_UID=",
+        "",
+        "# 扫描模式与过滤（跟界面上选的一致）",
+        "STATE_MODE=github",
+        "SCAN_MODE=%s" % (mode or "fast"),
+    ]
+    with io.open(os.path.join(outdir, "环境变量.txt"), "w", encoding="utf-8") as fp:
+        fp.write("\n".join(env) + "\n")
+
+    if plat == "server":
+        run_sh = (
+            "#!/usr/bin/env bash\n"
+            "# 手动跑一轮：拉配置 → 扫描 → 有票就推微信\n"
+            "cd \"$(dirname \"$0\")\"\n"
+            "export WXPUSHER_SPT=\"%s\"\n"
+            "export GITHUB_PAT=\"%s\"\n"
+            "export GITHUB_REPO=\"%s\"\n"
+            "export STATE_MODE=github\n"
+            "python3 cloud_function.py\n"
+        ) % (spt or "SPT_你的token", pat or "ghp_你的令牌",
+             repo or "用户名/仓库名")
+        with io.open(os.path.join(outdir, "run.sh"), "w", encoding="utf-8") as fp:
+            fp.write(run_sh)
+
+    with io.open(os.path.join(outdir, "操作步骤.txt"), "w", encoding="utf-8") as fp:
+        fp.write("部署平台：%s\n%s\n%s\n"
+                 % (PLAT_DIR.get(plat, plat), "=" * 40,
+                    DEPLOY_STEPS.get(plat, "")))
+        if missing:
+            fp.write("\n注意：以下文件没能自动取到，请从仓库手动下载放进本目录：\n  %s\n"
+                     % "\n  ".join(missing))
+
+    return outdir
+
+
 # ---------------------------------------------------------------- IO 辅助
 
 def load_cfg():
@@ -330,6 +473,25 @@ class App:
                           ("同步到 GitHub（云端生效）", self.on_sync)]:
             ttk.Button(bbox, text=text, command=cmd).pack(side="left", padx=4)
 
+        # ---------- 部署平台 ----------
+        dbox = ttk.LabelFrame(root, text=" 部署平台（想把监控换到别的地方跑就选这里）")
+        dbox.pack(fill="x", padx=10, pady=(0, 6))
+        self.v_platform = tk.StringVar(value=cfg.get("platform") or "github")
+        ttk.Label(dbox, text="运行平台").grid(row=0, column=0, padx=(10, 3), pady=6, sticky="e")
+        cb = ttk.Combobox(dbox, textvariable=self.v_platform, width=20, state="readonly",
+                          values=["github", "tencent", "aliyun", "server"])
+        cb.grid(row=0, column=1, sticky="w")
+        cb.bind("<Enter>", lambda ev: self.hint(
+            "github=GitHub Actions（当前，免费但5分钟粒度）；tencent=腾讯云函数；"
+            "aliyun=阿里云函数计算；server=自己的服务器/云主机"))
+        self.plat_hint = tk.StringVar(value="")
+        ttk.Label(dbox, textvariable=self.plat_hint, foreground="#06c").grid(
+            row=0, column=2, padx=12, sticky="w")
+        ttk.Button(dbox, text="生成部署包", command=self.on_deploy).grid(
+            row=0, column=3, padx=6)
+        self._sync_plat_hint()
+        self.v_platform.trace_add("write", lambda *_: self._sync_plat_hint())
+
         bbox2 = ttk.Frame(root)
         bbox2.pack(fill="x", padx=10, pady=(0, 8))
         for text, cmd, tip in [
@@ -522,6 +684,52 @@ class App:
         finally:
             self.busy = False
 
+
+    # ---- 部署平台 ----
+
+    PLAT_INFO = {
+        "github": ("GitHub Actions", "当前方式，免费；最小 5 分钟粒度（任务内循环做到约 77 秒）"),
+        "tencent": ("腾讯云函数 SCF", "1 分钟粒度、境内 IP；需要实名过的腾讯云账号"),
+        "aliyun": ("阿里云函数计算 FC", "1 分钟粒度、境内 IP；需要实名过的阿里云账号"),
+        "server": ("自己的服务器", "云主机/NAS/常开的电脑；cron 或 systemd 定时，最自由"),
+    }
+
+    def _sync_plat_hint(self):
+        name, desc = self.PLAT_INFO.get(self.v_platform.get(), ("", ""))
+        self.plat_hint.set("%s：%s" % (name, desc) if name else "")
+
+    def on_deploy(self):
+        """把当前配置 + 运行所需文件打成一个可直接上传的部署包"""
+        plat = self.v_platform.get().strip() or "github"
+        try:
+            cfg = self.collect()
+        except ValueError as e:
+            messagebox.showerror("填错了", str(e))
+            return
+        save_cfg(cfg)
+        c = load_cred()
+        c["wxpusher_spt"] = self.v_spt.get().strip()
+        c["github_pat"] = self.v_pat.get().strip()
+        c["github_repo"] = self.v_repo.get().strip()
+        save_cred(c)
+        self.busy = True
+        threading.Thread(target=self._deploy, args=(plat, cfg), daemon=True).start()
+
+    def _deploy(self, plat, cfg):
+        try:
+            outdir = make_deploy_package(plat, cfg, self.v_spt.get().strip(),
+                                         self.v_pat.get().strip(),
+                                         self.v_repo.get().strip(),
+                                         self.v_mode.get().strip(),
+                                         bool(self.v_seated.get()))
+            print("\n[部署包] 已生成：%s\n" % outdir)
+            print("%s\n" % DEPLOY_STEPS.get(plat, ""))
+        except Exception as e:      # noqa: BLE001
+            import traceback
+            print("[部署包] 生成失败：%s\n" % e)
+            traceback.print_exc()
+        finally:
+            self.busy = False
 
     # ---- 云端监控开关 ----
 
