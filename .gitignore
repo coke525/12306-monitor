@@ -28,3 +28,11 @@ upload_binary.py
 dist3/
 build3/
 _gui_check.txt
+dist4/
+build4/
+_pushtest/
+_push_probe.py
+dist3/
+build3/
+dist5/
+build5/
