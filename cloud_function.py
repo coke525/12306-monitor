@@ -51,7 +51,13 @@ import cloud_monitor as cm   # noqa: E402
 
 def run_once():
     """各平台统一调用的实际逻辑"""
-    cm.run_once()
+    try:
+        info = cm.run_once()
+    except Exception as e:      # noqa: BLE001
+        return {"ok": False, "error": repr(e)[:300]}
+    if isinstance(info, dict):
+        info["ok"] = True
+        return info
     return {"ok": True}
 
 
