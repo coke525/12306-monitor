@@ -268,9 +268,15 @@ def load_config():
     # 注意 dest 写成 null 或留空都要当成「不启用」，不能转成字符串 "NONE"
     raw_dest = comp.get("dest") if isinstance(comp, dict) else None
     if raw_dest and str(raw_dest).strip():
+        # 分手站可以填多个：["ZZF","ZAF"] 表示在哪个站分手都算
+        raw_split = comp.get("split_at")
+        if isinstance(raw_split, (list, tuple)):
+            splits = [str(x).strip().upper() for x in raw_split if str(x).strip()]
+        else:
+            splits = [str(raw_split).strip().upper()] if str(raw_split or "").strip() else []
         COMPANION = {
             "dest": str(comp["dest"]).strip().upper(),
-            "split_at": str(comp.get("split_at", "")).strip().upper(),
+            "split_at": splits,
             "name": str(comp.get("name", "同伴")).strip() or "同伴",
             "tickets": int(comp.get("tickets", 2) or 2),
             "final_by": (str(comp["final_by"]).strip()
@@ -328,7 +334,8 @@ def load_config():
     if COMPANION:
         log("同行人模式  %s 去 %s，两人在 %s 分手，共同段需 ≥%d 张票"
             % (COMPANION["name"], sname(COMPANION["dest"]),
-               sname(COMPANION["split_at"]), COMPANION["tickets"]))
+               "/".join(sname(x) for x in COMPANION["split_at"]),
+               COMPANION["tickets"]))
     log("换乘网络  %s → %s   最多 %d 次换乘，需扫描 %d 条区间"
         % (" → ".join("/".join(x) for x in _layers()),
            sname(DEST), max_segs() - 1, len(ROUTES)))
@@ -590,13 +597,14 @@ def enough_for(seats, n):
     return max(vals or [0]) >= n
 
 
-def shared_legs(p, split_at):
-    """方案里两人「一起坐」的那几段：从第一段到第一次抵达分手站为止。
+def shared_legs(p):
+    """方案里两人「一起坐」的那几段：从第一段到第一次抵达任一分手站为止。
 
     压根不经过分手站就返回 None，说明这条路线没法跟对方同行。
     """
+    splits = set(COMPANION.get("split_at") or [])
     for i, l in enumerate(p["legs"]):
-        if l["to_code"] == split_at:
+        if l["to_code"] in splits:
             return p["legs"][:i + 1]
     return None
 
@@ -618,7 +626,7 @@ def pair_companions(plans):
         dest = p["legs"][-1]["to_code"]
         if dest not in (mine_dest, fr_dest):
             continue
-        shared = shared_legs(p, COMPANION["split_at"])
+        shared = shared_legs(p)
         if not shared:
             continue
         key = (p["date"], tuple((l["code"], l["from_code"], l["to_code"])
@@ -631,7 +639,7 @@ def pair_companions(plans):
         mine, fri = b.get("mine"), b.get("friend")
         if not mine or not fri:
             continue                       # 只有一个人走通，不算同行方案
-        shared = shared_legs(mine, COMPANION["split_at"])
+        shared = shared_legs(mine)
         ok = all(enough_for(l["seats"], need) for l in shared)
         out.append({
             "date": mine["date"], "shared": shared, "need": need,
