@@ -268,12 +268,17 @@ def load_config():
         return False
 
     if cfg.get("dates"):
-        DATES = [str(x) for x in cfg["dates"]]
+        DATES = [str(x).strip() for x in cfg["dates"]]
     if cfg.get("date_prefs"):
         DATE_PREF = {}
         for k, v in cfg["date_prefs"].items():
             if isinstance(v, dict):
-                DATE_PREF[str(k)] = v
+                d = dict(v)          # 保留 _说明 之类的注释字段
+                # 时间统一补成 HH:MM，否则手改配置写成 9:5 或带空格时，
+                # 字符串大小的比较会算错（" 9:5" < "10:00" 是假的）
+                for key in ("dep_from", "dep_to", "arr_zz_by", "final_by"):
+                    d[key] = norm_hm(v.get(key))
+                DATE_PREF[str(k).strip()] = d
     if cfg.get("origins"):
         ORIGINS = [str(x) for x in cfg["origins"]]
     if cfg.get("transfer_cities"):
@@ -309,8 +314,7 @@ def load_config():
             "split_at": as_split(comp.get("split_at")),
             "name": str(comp.get("name", "同伴")).strip() or "同伴",
             "tickets": int(comp.get("tickets", 2) or 2),
-            "final_by": (str(comp["final_by"]).strip()
-                         if comp.get("final_by") else ""),
+            "final_by": norm_hm(comp.get("final_by")) or "",
             "max_transfers": mt,
         }
 
@@ -397,6 +401,24 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 CTX = ssl.create_default_context()
 CTX.check_hostname = False
 CTX.verify_mode = ssl.CERT_NONE
+
+
+def norm_hm(v):
+    """时间归一化：把随手写的写法统一成 HH:MM。空值 / 认不出来的返回 None（=不限）。
+
+    支持 9:5、07:1、18：20（全角冒号）、前后带空格等写法；25:00 这种非法值按不限处理。
+    """
+    s = str(v or "").strip().replace("：", ":")
+    if not s:
+        return None
+    try:
+        h, m = s.split(":")[:2]
+        h, m = int(h), int(m)
+    except Exception:      # noqa: BLE001
+        return None
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        return None
+    return "%02d:%02d" % (h, m)
 
 
 def sname(c):

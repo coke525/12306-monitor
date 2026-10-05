@@ -13,9 +13,11 @@
 """
 
 import base64
+import datetime
 import io
 import json
 import os
+import re
 import ssl
 import sys
 import threading
@@ -295,9 +297,91 @@ def split_codes(s):
     return [x.strip().upper() for x in (s or "").replace("，", ",").split(",") if x.strip()]
 
 
-# 时间下拉的可选项：留空=不限，其余半小时一档（Combobox 同时允许手输任意时间）
-TIME_CHOICES = [""] + ["%02d:%02d" % (h, m)
-                       for h in range(5, 24) for m in (0, 30)] + ["23:59"]
+def date_choices(days=60):
+    """日期下拉：今天起 days 天（12306 预售一般 15 天，给足冗余，也能手填）"""
+    today = datetime.date.today()
+    return [(today + datetime.timedelta(days=i)).isoformat() for i in range(days)]
+
+
+class TimeBox(ttk.Frame):
+    """时间选择：小时 + 分钟两个下拉，精确到分钟，0:00~23:59 全天可选。
+
+    对外仍然只操作那个 StringVar（"HH:MM"，空串=不限），
+    所以写配置、跑扫描的代码一行都不用改。
+    两个框都选「不限」就是清空。"""
+
+    NONE = "不限"
+    HOURS = [NONE] + ["%02d" % h for h in range(24)]
+    MINUTES = [NONE] + ["%02d" % m for m in range(60)]
+
+    def __init__(self, master, var, hint=None):
+        ttk.Frame.__init__(self, master)
+        self.var = var
+        self._lock = False
+        self.h = tk.StringVar()
+        self.m = tk.StringVar()
+        cbh = ttk.Combobox(self, textvariable=self.h, values=self.HOURS,
+                           width=4, state="readonly", justify="center")
+        cbh.pack(side="left")
+        ttk.Label(self, text=":").pack(side="left")
+        cbm = ttk.Combobox(self, textvariable=self.m, values=self.MINUTES,
+                           width=4, state="readonly", justify="center")
+        cbm.pack(side="left")
+        self.h.trace_add("write", lambda *_: self._out())
+        self.m.trace_add("write", lambda *_: self._out())
+        self.var.trace_add("write", lambda *_: self._in())
+        self._in()
+        if hint:
+            self.bind_hint(hint)
+
+    def bind_hint(self, fn):
+        """鼠标移到整个控件（含里面两个下拉）上都触发提示"""
+        stack = [self]
+        while stack:
+            w = stack.pop()
+            w.bind("<Enter>", lambda ev: fn())
+            stack.extend(w.winfo_children())
+
+    def _norm(self, v):
+        v = (v or "").strip()
+        return "" if (not v or v == self.NONE) else v
+
+    def _in(self):
+        """外部变量变了 → 拆到两个下拉里显示"""
+        if self._lock:
+            return
+        raw = (self.var.get() or "").strip()
+        h = m = self.NONE
+        if raw:
+            try:
+                a, b = raw.replace("：", ":").split(":")[:2]
+                a, b = int(a), int(b)
+                if 0 <= a <= 23 and 0 <= b <= 59:
+                    h, m = "%02d" % a, "%02d" % b
+            except Exception:      # noqa: BLE001  格式不认就当不限
+                pass
+        self._lock = True
+        self.h.set(h)
+        self.m.set(m)
+        self._lock = False
+
+    def _out(self):
+        """下拉选了 → 拼回 HH:MM；两个都不限就清空"""
+        if self._lock:
+            return
+        h, m = self._norm(self.h.get()), self._norm(self.m.get())
+        self._lock = True
+        try:
+            if h and m:                      # 时、分都选了
+                self.var.set("%s:%s" % (h, m))
+            elif h:                          # 只选了小时 → 整点
+                self.var.set("%s:00" % h)
+                self.m.set("00")
+            else:                            # 只有分钟没法成立，顺着清掉
+                self.var.set("")
+                self.m.set(self.NONE)
+        finally:
+            self._lock = False
 
 
 def station_map():
@@ -456,7 +540,7 @@ class App:
         self.dbody = ttk.Frame(dbox)
         self.dbody.pack(anchor="w", padx=6, pady=(6, 0))
         dhead = ["日期", "最早出发", "最晚出发", "最晚到换乘站", "最晚到终点"]
-        for i, (h, w) in enumerate(zip(dhead, (108, 84, 84, 108, 88))):
+        for i, (h, w) in enumerate(zip(dhead, (124, 96, 96, 108, 100))):
             ttk.Label(self.dbody, text=h, foreground="#555").grid(
                 row=0, column=i, padx=4, pady=(0, 3), sticky="w")
             self.dbody.columnconfigure(i, minsize=w)
@@ -579,13 +663,23 @@ class App:
         vs = [tk.StringVar(value=date)]
         for k in ("dep_from", "dep_to", "arr_zz_by", "final_by"):
             vs.append(tk.StringVar(value=(p.get(k) or "")))
-        for c, v in enumerate(vs[:4]):
-            ttk.Entry(self.dbody, textvariable=v, width=13).grid(
+        dc = ttk.Combobox(self.dbody, textvariable=vs[0], values=date_choices(),
+                          width=11)
+        dc.grid(row=r, column=0, padx=4, pady=2, sticky="ew")
+        dc.bind("<Enter>", lambda ev: self.hint(
+            "哪天出发。下拉里是今天起 60 天，可以直接点选；"
+            "也可以自己手填 YYYY-MM-DD"))
+        # 四个时间都用「时 + 分」两个下拉，精确到分钟，全天可点
+        for c, tip in [
+                (1, "这天最早几点出发都行。下拉选到分钟；两个都选「不限」= 全天不挑"),
+                (2, "这天最晚几点出发。早于这个时刻的车才推给你；不限就留空"),
+                (3, "到换乘站（郑州/郑州东等）的最晚时刻，晚于它就来不及接续。"
+                    "不限 = 只看最终到达时间"),
+                (4, "到达终点的最晚时间，超过就不推给你。精确到分钟，不限 = 不看这条"),
+        ]:
+            TimeBox(self.dbody, vs[c],
+                    hint=lambda t=tip: self.hint(t)).grid(
                 row=r, column=c, padx=4, pady=2, sticky="ew")
-        cb = ttk.Combobox(self.dbody, textvariable=vs[4], values=TIME_CHOICES, width=11)
-        cb.grid(row=r, column=4, padx=4, pady=2, sticky="ew")
-        cb.bind("<Enter>", lambda ev: self.hint(
-            "到达终点的最晚时间，超过就不推给你。可直接选，也可手填（如 16:30）；留空=不限"))
         self.rows.append(vs)
 
     def del_row(self):
@@ -627,10 +721,11 @@ class App:
         cb.grid(row=r, column=3, padx=4, pady=2, sticky="ew")
         cb.bind("<Enter>", lambda ev: self.hint(
             "共同乘坐那几段要一次买到几张（含你自己）。同一席位等级够这个数才算真能坐一起"))
-        fb = ttk.Combobox(self.cbody, textvariable=vs[4], values=TIME_CHOICES, width=9)
+        fb = TimeBox(self.cbody, vs[4])
         fb.grid(row=r, column=4, padx=4, pady=2, sticky="ew")
-        fb.bind("<Enter>", lambda ev: self.hint(
-            "他到目的地的最晚时间，可以跟你的不一样。留空 = 跟上面主终点的底线相同"))
+        fb.bind_hint(lambda: self.hint(
+            "他到目的地的最晚时间，精确到分钟，可以跟你的完全不一样。"
+            "两个框都选「不限」= 跟上面主终点的底线相同"))
         mt = ttk.Combobox(self.cbody, textvariable=vs[5],
                           values=["不限", "0", "1", "2", "3"], width=6)
         mt.grid(row=r, column=5, padx=4, pady=2, sticky="ew")
@@ -662,6 +757,9 @@ class App:
             d = vs[0].get().strip()
             if not d:
                 continue
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
+                raise ValueError("日期「%s」格式不对，要写成 YYYY-MM-DD"
+                                 "（点日期框的下拉直接选最省事）" % d)
             dates.append(d)
             prefs[d] = {"dep_from": vs[1].get().strip() or "00:00",
                         "dep_to": vs[2].get().strip() or "23:59",
